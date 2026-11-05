@@ -783,7 +783,7 @@ function ruHeight(qx, qy, lod, P, ero = true){
   const vis = lam => lod > 0 ? smooth(4*lod, 8*lod, lam*U) : 1;   // (an octave of wavelength lam Rune units, against the sample spacing)
   // FractalNoise(p, HEIGHT_FREQUENCY, HEIGHT_OCTAVES, HEIGHT_LACUNARITY, HEIGHT_GAIN) * HEIGHT_AMP, at his frequency and (scale blend) half / double
   let n0 = 0, n1 = 0, n2 = 0;
-  for (const [fm, wgt] of [[1, 1 - P.wb - P.wt], [0.5, P.wb], [2, P.wt]]){
+  for (const [fm, wgt] of [[1, 1 - P.wb - P.wt], [0.5, P.wb], [2, P.wt*0.5]]){   // (the tight copy at half amplitude: its slopes stay his - grain changes spacing, not steepness)
     if (!(wgt > 0)) continue;
     let nf = RU.hfreq*fm, na = 1;
     for (let i = 0; i < RU.hoct; i++){
@@ -797,7 +797,7 @@ function ruHeight(qx, qy, lod, P, ero = true){
   n0 = n0*0.5 + 0.5; n1 *= 0.5; n2 *= 0.5;
   // ErosionFilter(...)
   const GW = P.gw, rnd = [P.rr, RU.round[1], RU.round[2], RU.round[3]];
-  let strength = RU.strength*relK*P.sK*RU.scale, fadeTarget = fade0, freq = 1/(RU.scale*RU.cell), rmult = 1, magnitude = 0;
+  let strength = RU.strength*Math.min(relK*P.sK, RUV.sMax)*RU.scale, fadeTarget = fade0, freq = 1/(RU.scale*RU.cell), rmult = 1, magnitude = 0;
   const sl = Math.max(Math.hypot(n1, n2), 1e-10), on = RU.onset;
   const rIn = (rnd[1] + (rnd[0] - rnd[1])*Math.max(0, Math.min(1, fadeTarget + 0.5)))*rnd[2];
   let combi = ruEaseOut(ruSmoothStart(sl*on[0], rIn*on[0])), rmMask = ruEaseOut(sl*on[2]), rmFade = fadeTarget;
@@ -842,7 +842,10 @@ const ruField = (qx, qy, L, ox, oy) => { const w = qy/DWU, a = pnoise(qx/L + ox,
   return (a + 0.5*b)/0.75; };   // (~ -1 .. 1)
 // relKnots: the relief field r -> amplitude factor, piecewise linear through its measured quantiles (8000 points along the Way): p15 -> 0.35 (the
 // plains' edge), p65 -> 0.9 (the mountains'), p90 -> 1.3: ~15% plains, ~50% hills, ~35% mountains
-const RUV = {relL: 80, chL: 40, elL: 160, grL: 40, relKnots: [[-1.0, 0.12], [-0.62, 0.35], [-0.03, 0.9], [0.36, 1.3], [0.7, 1.45]], el: 0.035, grain: [0.25, 0.65]};
+// (character ranges from soft and round up to about his demo, never sharper than his default rounding; relief x character capped at sMax x his strength: the extremes
+// stacked into fields of needles and blades)
+const RUV = {relL: 80, chL: 40, elL: 160, grL: 40, relKnots: [[-1.0, 0.12], [-0.62, 0.35], [-0.03, 0.9], [0.36, 1.2], [0.7, 1.3]], el: 0.035, grain: [0.25, 0.65],
+  sK: [0.5, 1.0], gw: [0.35, 0.6], det: [1.0, 1.6], rr: [0.6, 0.2], sMax: 1.15};   // (smooth, curved land preferred: softer and rounder than his demo on average)
 const ruRelCurve = r => { const K = RUV.relKnots; let v = K[0][1]; for (let i = 1; i < K.length; i++) v += (K[i][1] - K[i - 1][1])*Math.max(0, Math.min(1, (r - K[i - 1][0])/(K[i][0] - K[i - 1][0]))); return v; };
 function ruParams(qx, qy, amp){
   if (!RU.vary) return {relK: 1, sK: 1, gw: RU.gully, det: RU.detail, rr: RU.round[0], elev: 0, wb: 0, wt: 0};
@@ -851,7 +854,8 @@ function ruParams(qx, qy, amp){
   const k = smooth(-0.6, 0.6, ruField(qx, qy, RUV.chL, 9.1, 2.3));
   const e = Math.max(-1, Math.min(1, ruField(qx, qy, RUV.elL, 5.5, 11.9)*1.4));
   const g = ruField(qx, qy, RUV.grL, 13.7, 6.1), wb = smooth(RUV.grain[0], RUV.grain[1], g), wt = smooth(-RUV.grain[0], -RUV.grain[1], g);
-  return {relK, sK: 0.6 + 0.8*k, gw: 0.3 + 0.4*k, det: 1.0 + 1.2*k, rr: 0.4 - 0.35*k, elev: RUV.el*e, wb, wt};
+  const L = a => a[0] + (a[1] - a[0])*k;
+  return {relK, sK: L(RUV.sK), gw: L(RUV.gw), det: L(RUV.det), rr: L(RUV.rr), elev: RUV.el*e, wb, wt};
 }
 const ruToH = (E, wl, amp, P) => wl + (E - 0.5 + RU.center*P.relK + P.elev)*RU.km/Math.max(amp, 0.05);
 function uberHOld(qx, qy, wl = 0, amp = 1, dl = null, lod = 0){
@@ -2151,7 +2155,7 @@ function makeLib(qy = null){
     const powInv = (t, pw) => pow(clamp(t, 0, 1).oneMinus(), pw).oneMinus();
     // FractalNoise * HEIGHT_AMP
     const n = vec3(0).toVar();
-    for (const [fm, wgt] of [[1, float(1).sub(wb).sub(wt)], [0.5, wb], [2, wt]]){   // (his frequency, and the scale blend's half / double: ruHeight)
+    for (const [fm, wgt] of [[1, float(1).sub(wb).sub(wt)], [0.5, wb], [2, wt.mul(0.5)]]){   // (his frequency, and the scale blend's half / double: ruHeight)
       If(wgt.greaterThan(0), () => {
         for (let i = 0; i < RU.hoct; i++){
           const nf = RU.hfreq*fm*Math.pow(RU.hlac, i), {per, fr} = axis(float(nf)), v = vis(float(1/nf)).mul(wgt).toVar();
@@ -2163,7 +2167,7 @@ function makeLib(qy = null){
     const fade0 = clamp(n.x.div(A.mul(0.6)), -1, 1).toVar();
     n.assign(n.mul(0.5).add(vec3(0.5, 0, 0)));
     // ErosionFilter
-    const strength = relK.mul(sK).mul(RU.strength*RU.scale).toVar(), fadeTarget = float(fade0).toVar(), freq = float(1/(RU.scale*RU.cell)).toVar();
+    const strength = min(relK.mul(sK), RUV.sMax).mul(RU.strength*RU.scale).toVar(), fadeTarget = float(fade0).toVar(), freq = float(1/(RU.scale*RU.cell)).toVar();
     const rmult = float(1).toVar(), magnitude = float(0).toVar(), rnd = [RR, RU.round[1], RU.round[2], RU.round[3]], on = RU.onset;
     const sl = max(length(n.yz), 1e-10).toVar();
     const rIn = mix(float(rnd[1]), rnd[0], clamp(fadeTarget.add(0.5), 0, 1)).mul(rnd[2]);
@@ -2213,8 +2217,8 @@ function makeLib(qy = null){
     const elev = clamp(field(RUV.elL, 5.5, 11.9).mul(1.4), -1, 1).mul(RUV.el).mul(U_RUV).toVar();
     const g = field(RUV.grL, 13.7, 6.1).toVar(), wb = smoothstep(RUV.grain[0], RUV.grain[1], g).mul(U_RUV), wt = smoothstep(-RUV.grain[0], -RUV.grain[1], g).mul(U_RUV);
     const vk = (his, lo, hi) => mix(float(his), k.mul(hi - lo).add(lo), U_RUV);   // (lo .. hi with the character k; his value with variety off)
-    const pa = vec4(relK, vk(1, 0.6, 1.4), vk(RU.gully, 0.3, 0.7), vk(RU.detail, 1.0, 2.2)).toVar();   // (amplitude, strength, gully weight, detail)
-    const pb = vec4(vk(RU.round[0], 0.4, 0.05), wb, wt, 0).toVar();   // (ridge rounding, scale blend)
+    const pa = vec4(relK, vk(1, ...RUV.sK), vk(RU.gully, ...RUV.gw), vk(RU.detail, ...RUV.det)).toVar();   // (amplitude, strength, gully weight, detail)
+    const pb = vec4(vk(RU.round[0], ...RUV.rr), wb, wt, 0).toVar();   // (ridge rounding, scale blend)
     const r = (ero ? tRuHeight : tRuHeightBase)(vec2(q.x, ym(q.y, SPER)), lod, pa, pb).toVar();
     const ampC = max(amp, 0.05).toVar();
     const h = wl.add(r.x.sub(0.5).add(relK.mul(U_RUC)).add(elev).mul(U_RUNU).div(SUK).div(ampC)).toVar();   // (ruToH)
