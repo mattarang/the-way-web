@@ -727,6 +727,7 @@ function uberEro(qx, qy, gx, gy, fade, strength, lod){
   const KM = 1000/SUK, sl = Math.max(Math.hypot(gx, gy), 1e-6);
   let mask = easeOut(smoothStart(sl*1.25, (UB.ERC + (UB.ERR - UB.ERC)*Math.max(0, Math.min(1, fade + 0.5)))*0.1*1.25));
   let gsx = gx/sl*0.7, gsy = gy/sl*0.7, hE = 0, gEx = 0, gEy = 0, A = strength*481.5/UB.EGW, C = UB.EC0, rmult = 1;
+  let rmask = easeOut(sl*2.8), rfade = fade;   // (the ridge map, as the Godot project's erosion_filter_f: ERO_ONSET.z / .w = 2.8 / 1.5)
   for (let o = 0; o < UB.EN; o++){
     const salt = o*977 + 4801, gl = Math.hypot(gsx, gsy) || 1e-9, dx = gsx/gl, dy = gsy/gl, sx = -dy*0.7*6.2831853, sy = dx*0.7*6.2831853;
     const px = qx/C, py = qy/C, cx = Math.floor(px), cy = Math.floor(py), fx = px - cx, fy = py - cy, nx = TU/C, ny = SPER/C;
@@ -748,9 +749,10 @@ function uberEro(qx, qy, gx, gy, fade, strength, lod){
     hE += fH*A; gEx += fX*A; gEy += fY*A; fade = fH;
     const nm = easeOut(smoothStart(sloping*1.25, (UB.ERC + (UB.ERR - UB.ERC)*Math.max(0, Math.min(1, ix + 0.5)))*rmult*1.25));
     mask = powInv(mask, 1.5)*nm;
+    rfade += (gulH - rfade)*rmask; rmask *= easeOut(sloping*1.5);
     A *= 0.5; C *= 0.5; rmult *= 2;
   }
-  return [hE, gEx, gEy];
+  return [hE, gEx, gEy, rfade*(1 - rmask)];   // (ridge: -1 creases .. 1 ridges)
 }
 // the base's normalized height at q (no erosion), and its noise value U (for the fade target)
 function uberBase(qx, qy, wl, amp, dl, lod){
@@ -2024,6 +2026,7 @@ function makeLib(qy = null){
     const powInv = (t, p) => pow(clamp(t, 0, 1).oneMinus(), p).oneMinus();
     const KM = 1000/SUK, sl = max(length(g), 1e-6).toVar(), fade = float(fade0).toVar();
     const mask = easeOut(smoothStart(sl.mul(1.25), mix(float(UB.ERC), float(UB.ERR), clamp(fade.add(0.5), 0, 1)).mul(0.1*1.25))).toVar();
+    const rmask = easeOut(sl.mul(2.8)).toVar(), rfade = float(fade0).toVar();   // (the ridge map: see uberEro)
     const gs = g.div(sl).mul(0.7).toVar(), hE = float(0).toVar(), A = strength.mul(481.5/UB.EGW).toVar(), C = float(UB.EC0).toVar(), rmult = float(1).toVar();
     Loop({start: 0, end: UB.EN, type: 'int', name: 'eroO'}, ({eroO}) => {
      If(select(lod.greaterThan(0), C.greaterThan(lod.mul(2)), true), () => {   // (octaves under two samples contribute nothing: skipped, not computed and faded)
@@ -2050,10 +2053,11 @@ function makeLib(qy = null){
       hE.addAssign(fH.mul(A)); fade.assign(fH);
       const nm = easeOut(smoothStart(sloping.mul(1.25), mix(float(UB.ERC), float(UB.ERR), clamp(ip.x.add(0.5), 0, 1)).mul(rmult).mul(1.25)));
       mask.assign(powInv(mask, 1.5).mul(nm));
+      rfade.assign(mix(rfade, ip.x.mul(gd), rmask)); rmask.mulAssign(easeOut(sloping.mul(1.5)));
      });
       A.mulAssign(0.5); C.mulAssign(0.5); rmult.mulAssign(2);
     });
-    return vec3(hE, 0, 0);
+    return vec3(hE, rfade.mul(rmask.oneMinus()), 0);   // (y: the ridge map, -1 creases .. 1 ridges)
   });
   // height and its slope: the base at three points (its slope from them), the erosion at each; the output slope by differences at half the sample
   // spacing (normals follow the heights exactly). The base slope at q stands in at the two offset points (the base is smooth: its finest octave 2 km)
@@ -2073,8 +2077,8 @@ function makeLib(qy = null){
       const E = UB.EFD;   // (central differences over 2*EFD: see uberH)
       const g = vec2(Hq(vec2(E, 0)).sub(Hq(vec2(-E, 0))), Hq(vec2(0, E)).sub(Hq(vec2(0, -E)))).div(2*E).mul(amp).mul(SUK).toVar(), fade = clamp(U0.div(UB.zN*1.5), -1, 1).toVar(), str = smoothstep(0, 0.08, b0.sub(wl)).mul(UB.ES).toVar(), k = amp.mul(1000);
       const qe = vec2(q.x, ym(q.y, SPER)).toVar();   // (the absolute along-axis coordinate, wrapped at SPER: the bake's q.y is an offset in its window)
-      const e0 = tUberEro(qe, g, fade, str, lod).x.div(k).toVar();
-      if (hOnly) out.assign(vec3(b0.add(e0), 0, 0));   // (the bake: the slope comes from the neighbouring baked heights, clipSlopeMat)
+      const er = tUberEro(qe, g, fade, str, lod).toVar(), e0 = er.x.div(k).toVar();
+      if (hOnly) out.assign(vec3(b0.add(e0), er.y, 0));   // (y: the ridge map, carried to the ridge pass)   // (the bake: the slope comes from the neighbouring baked heights, clipSlopeMat)
       else { const ex = tUberEro(qe.add(vec2(e, 0)), g, fade, str, lod).x.div(k), ey = tUberEro(qe.add(vec2(0, e)), g, fade, str, lod).x.div(k);
         out.assign(vec3(b0.add(e0), bx.add(ex).sub(b0.add(e0)).div(e), by.add(ey).sub(b0.add(e0)).div(e))); }
     });
@@ -2082,7 +2086,8 @@ function makeLib(qy = null){
   };
   const analyticBaked = (q, lod, wl, amp, hOnly = false) => {
     const ha = (UBER ? uberAt(q, lod, wl, amp, regions(q, wl), hOnly) : terrainAt(q, lod, wl, amp, regions(q, wl))).toVar(), hh = ha.x;
-    return vec4(select(hh.greaterThanEqual(wl), amp.mul(hh.sub(wl)), tBedDepth(amp.mul(wl.sub(hh))).negate()), ha.yz.mul(amp.mul(bedSlope(amp.mul(wl.sub(hh))))), clamp(hh, -4, 64));   // (the 'no data' marker is w = 99: tests use > 98 - a test at 50 threw away real heights of the flattest biomes, h up to ~57)
+    const yz = hOnly && UBER ? ha.yz : ha.yz.mul(amp.mul(bedSlope(amp.mul(wl.sub(hh)))));   // (heights-only bake: y carries the ridge map)
+    return vec4(select(hh.greaterThanEqual(wl), amp.mul(hh.sub(wl)), tBedDepth(amp.mul(wl.sub(hh))).negate()), yz, clamp(hh, -4, 64));   // (the 'no data' marker is w = 99: tests use > 98 - a test at 50 threw away real heights of the flattest biomes, h up to ~57)
   };
   // THE ground for anything at q, dNoise from the camera: the baked data (the levels the pixels read there), else the analytic stand-in as that
   // level would bake it. Plants, rocks, grass, roads and water read the ground through this, so they sit on what is drawn.
@@ -2094,7 +2099,9 @@ function makeLib(qy = null){
   const groundTopo = (qr, Hf) => {
     const a = clipFetchSafe(float(8), qr).toVar(), b = clipFetchSafe(float(11), qr).toVar();
     const t = select(b.w.greaterThan(98), float(0), a.x.sub(b.x)).add(select(a.w.greaterThan(98), float(0), Hf.sub(a.x).mul(1.5)));
-    return smoothstep(0.05, -0.05, t);   // (+-50 m: a hollow or crest of that depth against its surroundings is fully wet or dry)
+    // (+-50 m: a hollow or crest of that depth against its surroundings is fully wet or dry) and, at the gullies' own scale, the erosion's ridge
+    // map (level 5: 16 m texels, a 4 km window): its creases gather water and fine soil (lush), its ridges are scoured dry and thin-soiled
+    return clamp(smoothstep(0.05, -0.05, t).sub(clipRidge(float(5), qr).mul(0.45)), 0, 1);
   };
   const groundBaked = (q, dNoise, wl, amp) => {
     const r = clipFetchDist(dNoise, q.sub(CL.camU)).toVar();
@@ -2844,6 +2851,14 @@ function clipCov(dNoise, qr){
 // (CL.KSH: AO and cast shadow never read levels finer than the old finest, 1.9 m texels: both reach a fixed number of texels, so the two
 // finer levels added for the near ground's shape would have shrunk their reach 4x right where you stand)
 CL.KSH = -9 - CL.L0;
+// the erosion's ridge map at camera-relative qr (-1 creases .. 1 ridges; 0 where no level covers it or with the classic terrain): from level kf,
+// or the first coarser one whose window holds qr (a coarser level's map has fewer octaves: only the broader gullies). Hardware-filtered: it
+// shades and thresholds, it never shapes the ground
+function clipRidge(kf, qr){
+  if (!UBER) return float(0);
+  const kj = clipFindLevel(kf, qr).toVar(), t = clipT(min(kj, float(CL.NL - 1)), qr).toVar();
+  return select(kj.greaterThan(98), float(0), rdTexN.sample(clipUV(min(kj, float(CL.NL - 1)), t.x, t.y)).level(0).x.mul(2).sub(1));
+}
 function clipAO(dNoise, qr){
   const kp = max(clipLevel(dNoise), CL.KSH).toVar(), k0 = floor(kp).toVar();
   const one = kf => { const t = clipT(kf, qr).toVar(); return select(clipInside(t), aoTexN.sample(clipUV(kf, t.x, t.y)).level(0).x, float(1)); };
@@ -2912,6 +2927,23 @@ CL.bakeInto = (rt, cam, row, f) => {
   renderer.setRenderTarget(rt); renderer.render(CL.sScene, cam);
 };
 CL.cam = new THREE.OrthographicCamera(0, 1, CL.NL, 0, 0.1, 10); CL.cam.position.z = 5;
+// THE RIDGE MAP (UBER): the erosion filter's own crest / crease field (Rune Skovbo Johansen's filter: -1 in its gullies .. 1 on its ridges, as the
+// Godot project's erosion_filter_f), which the heights-only bake carries in y; this pass copies it into an 8-bit atlas laid out as the levels
+// (0.5 = neutral). It drives the wetness (groundTopo): the ground's colour, the grass and the forests follow the same gullies the heights carve.
+CL.rdRt = new THREE.RenderTarget(CL.N, CL.N*CL.NL, {type: THREE.UnsignedByteType, format: THREE.RGBAFormat, minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter, depthBuffer: false, generateMipmaps: false});
+const rdTexN = texture(CL.rdRt.texture);
+CL.rdScene = new THREE.Scene();
+CL.rdQuad = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), (() => {
+  const m = new THREE.MeshBasicNodeMaterial({side: THREE.DoubleSide, depthTest: false, depthWrite: false, toneMapped: false}); m.fog = false;
+  const src = texture(CL.hrt[0].texture), NN = CL.N;
+  m.fragmentNode = Fn(() => {
+    const ix = floor(uv().x.mul(NN)), iy = floor(uv().y.mul(NN)), v = iy.add(0.5).div(NN);
+    const c = src.sample(vec2(ix.add(0.5).div(NN), CL.flip ? float(1).sub(v) : v)).level(0);
+    return vec4(select(c.w.greaterThanEqual(98), float(0.5), clamp(c.y.mul(0.5).add(0.5), 0, 1)), 0, 0, 1);
+  })();
+  return m;
+})());
+CL.rdQuad.frustumCulled = false; CL.rdScene.add(CL.rdQuad);
 // ---- ambient occlusion, baked beside the heights (horizon-based, after GTAO; here on the heightfield, so it is world-fixed: no screen noise, halos or flicker) ----
 // For each texel of a freshly baked level: 8 directions x 3 radii (2, 4 and 8 texels), the horizon's elevation above the LOCAL TANGENT PLANE (the horizon
 // tangent minus the baked slope along that direction), cos-weighted: visibility = 1 - mean(sin(horizon angle)), the radius' falloff 1 - (r/12)^2. The radius
@@ -3085,6 +3117,7 @@ function clipBake(k){
   U_BK.value = k; U_BO.value.copy(CL.org[k]); QY.set(CL.org[k].y);
   const ac = renderer.autoClear; renderer.autoClear = false;
   CL.bakeInto(CL.rt, CL.cam, k, 0); renderer.setRenderTarget(null);
+  if (UBER){ CL.rdQuad.position.set(0.5, k + 0.5, 0); CL.rdQuad.updateMatrixWorld(); renderer.setRenderTarget(CL.rdRt); renderer.render(CL.rdScene, CL.cam); renderer.setRenderTarget(null); }   // (the ridge map, see CL.rdRt)
   U_BROW.value = k; U_COVON.value = k <= 9 ? 1 : 0; CL.aoQuad.position.set(0.5, k + 0.5, 0); CL.aoQuad.updateMatrixWorld(); renderer.setRenderTarget(CL.aoRt); renderer.render(CL.aoScene, CL.cam); renderer.setRenderTarget(null);   // (the AO and cast shadow of the level just baked)
   renderer.autoClear = ac;
   CL.baked++;
