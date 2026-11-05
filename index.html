@@ -2022,6 +2022,7 @@ function makeLib(qy = null){
     const mask = easeOut(smoothStart(sl.mul(1.25), mix(float(UB.ERC), float(UB.ERR), clamp(fade.add(0.5), 0, 1)).mul(0.1*1.25))).toVar();
     const gs = g.div(sl).mul(0.7).toVar(), hE = float(0).toVar(), A = strength.mul(481.5/UB.EGW).toVar(), C = float(UB.EC0).toVar(), rmult = float(1).toVar();
     Loop({start: 0, end: UB.EN, type: 'int', name: 'eroO'}, ({eroO}) => {
+     If(select(lod.greaterThan(0), C.greaterThan(lod.mul(2)), true), () => {   // (octaves under two samples contribute nothing: skipped, not computed and faded)
       const salt = float(eroO).mul(977).add(4801).toVar();
       const dir = normalize(gs.add(vec2(1e-9, 0))).toVar(), side = vec2(dir.y.negate(), dir.x).mul(0.7*6.2831853).toVar();
       const pp = q.div(C).toVar(), ci = floor(pp).toVar(), pf = pp.sub(ci).toVar(), nx = float(TU).div(C), ny = float(SPER).div(C);
@@ -2045,13 +2046,14 @@ function makeLib(qy = null){
       hE.addAssign(fH.mul(A)); fade.assign(fH);
       const nm = easeOut(smoothStart(sloping.mul(1.25), mix(float(UB.ERC), float(UB.ERR), clamp(ip.x.add(0.5), 0, 1)).mul(rmult).mul(1.25)));
       mask.assign(powInv(mask, 1.5).mul(nm));
+     });
       A.mulAssign(0.5); C.mulAssign(0.5); rmult.mulAssign(2);
     });
     return vec3(hE, 0, 0);
   });
   // height and its slope: the base at three points (its slope from them), the erosion at each; the output slope by differences at half the sample
   // spacing (normals follow the heights exactly). The base slope at q stands in at the two offset points (the base is smooth: its finest octave 2 km)
-  const uberAt = (q, lod, wl, amp, rg) => {
+  const uberAt = (q, lod, wl, amp, rg, hOnly = false) => {
     const t = clamp(rg.mn.x.add(clamp(amp.sub(1.5).div(2.5), -0.4, 0.6).mul(0.35)).add(0.25).div(0.3), 0, 1), m = t.mul(t).mul(t.mul(-2).add(3)).toVar();
     const dl = rg.dl || vec4(0, 1, 0, 0);
     const sharp = clamp(m.mul(UB.sharpM).add(UB.sharp0).add(dl.w.mul(0.9)).add(rg.rA.x.mul(UB.sharpR)), -1, 1).toVar();
@@ -2067,13 +2069,14 @@ function makeLib(qy = null){
       const g = vec2(bxE.sub(b0), byE.sub(b0)).div(E).mul(amp).mul(SUK).toVar(), fade = clamp(U0.div(UB.zN*1.5), -1, 1).toVar(), str = smoothstep(0, 0.08, b0.sub(wl)).mul(UB.ES).toVar(), k = amp.mul(1000);
       const qe = vec2(q.x, ym(q.y, SPER)).toVar();   // (the absolute along-axis coordinate, wrapped at SPER: the bake's q.y is an offset in its window)
       const e0 = tUberEro(qe, g, fade, str, lod).x.div(k).toVar();
-      const ex = tUberEro(qe.add(vec2(e, 0)), g, fade, str, lod).x.div(k), ey = tUberEro(qe.add(vec2(0, e)), g, fade, str, lod).x.div(k);
-      out.assign(vec3(b0.add(e0), bx.add(ex).sub(b0.add(e0)).div(e), by.add(ey).sub(b0.add(e0)).div(e)));
+      if (hOnly) out.assign(vec3(b0.add(e0), 0, 0));   // (the bake: the slope comes from the neighbouring baked heights, clipSlopeMat)
+      else { const ex = tUberEro(qe.add(vec2(e, 0)), g, fade, str, lod).x.div(k), ey = tUberEro(qe.add(vec2(0, e)), g, fade, str, lod).x.div(k);
+        out.assign(vec3(b0.add(e0), bx.add(ex).sub(b0.add(e0)).div(e), by.add(ey).sub(b0.add(e0)).div(e))); }
     });
     return out;
   };
-  const analyticBaked = (q, lod, wl, amp) => {
-    const ha = (UBER ? uberAt(q, lod, wl, amp, regions(q, wl)) : terrainAt(q, lod, wl, amp, regions(q, wl))).toVar(), hh = ha.x;
+  const analyticBaked = (q, lod, wl, amp, hOnly = false) => {
+    const ha = (UBER ? uberAt(q, lod, wl, amp, regions(q, wl), hOnly) : terrainAt(q, lod, wl, amp, regions(q, wl))).toVar(), hh = ha.x;
     return vec4(select(hh.greaterThanEqual(wl), amp.mul(hh.sub(wl)), tBedDepth(amp.mul(wl.sub(hh))).negate()), ha.yz.mul(amp.mul(bedSlope(amp.mul(wl.sub(hh))))), clamp(hh, -4, 64));   // (the 'no data' marker is w = 99: tests use > 98 - a test at 50 threw away real heights of the flattest biomes, h up to ~57)
   };
   // THE ground for anything at q, dNoise from the camera: the baked data (the levels the pixels read there), else the analytic stand-in as that
@@ -2869,12 +2872,40 @@ const clipBakeMat = (() => {
     const q = vec2(U_BO.x.add(floor(uv().x.mul(U_BN)).mul(s)), floor(uv().y.mul(U_BN)).mul(s)).toVar();   // (y: the offset in the window; QY.Y0 its origin)
     const th = q.x.div(TU).mul(TAU).toVar(), z = U.uSU.sub(q.y.add(QY.Y0)).div(SUK).toVar();
     const B = tBiomeAt(z, th, true);
-    return analyticBaked(q, s, B.e.w, B.a.w.mul(5));   // (h is kept to -4..64: it reaches ~50 where a biome's amplitude is small; the old -2..4 capped snowlines and rock bands there)
+    return analyticBaked(q, s, B.e.w, B.a.w.mul(5), UBER);   // (UBER: heights only - the slope pass follows) (h is kept to -4..64: it reaches ~50 where a biome's amplitude is small; the old -2..4 capped snowlines and rock bands there)
   })();
   return m;
 })();
 CL.scene = new THREE.Scene();
 CL.quad = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), clipBakeMat); CL.quad.frustumCulled = false; CL.scene.add(CL.quad);
+// SLOPES FROM THE BAKE (the eroded terrain, UBER): the bake writes heights into a scratch target (one terrain evaluation per texel - the erosion
+// filter is the costliest part of the frame), then this pass takes each texel's slope from its baked neighbours (central differences; one-sided
+// at the window's edge) and writes the level's texels: the shading's normals are the drawn heights' own, by construction
+CL.hrt = [CL.N, CL.FN].map(n => new THREE.RenderTarget(n, n, {type: THREE.FloatType, format: THREE.RGBAFormat, minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter, depthBuffer: false, generateMipmaps: false}));
+CL.hScene = new THREE.Scene(); CL.hCam = new THREE.OrthographicCamera(0, 1, 1, 0, 0.1, 10); CL.hCam.position.z = 5;
+{ const hq = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), clipBakeMat); hq.position.set(0.5, 0.5, 0); hq.frustumCulled = false; CL.hScene.add(hq); CL.hCam.updateMatrixWorld(); hq.updateMatrixWorld(); }
+const makeSlopeMat = (rt, NN) => {
+  const m = new THREE.MeshBasicNodeMaterial({side: THREE.DoubleSide, depthTest: false, depthWrite: false, toneMapped: false}); m.fog = false;
+  const src = texture(rt.texture);
+  m.fragmentNode = Fn(() => {
+    const ix = floor(uv().x.mul(NN)).toVar(), iy = floor(uv().y.mul(NN)).toVar(), sp = exp2(U_BK.add(CL.L0)).toVar();
+    const rd = (x, y) => { const v = y.add(0.5).div(NN); return src.sample(vec2(x.add(0.5).div(NN), CL.flip ? float(1).sub(v) : v)).level(0); };
+    const c = rd(ix, iy).toVar();
+    const xl = max(ix.sub(1), 0), xr = min(ix.add(1), NN - 1), yd = max(iy.sub(1), 0), yu = min(iy.add(1), NN - 1);
+    const gx = rd(xr, iy).x.sub(rd(xl, iy).x).div(xr.sub(xl).mul(sp)), gy = rd(ix, yu).x.sub(rd(ix, yd).x).div(yu.sub(yd).mul(sp));
+    return vec4(c.x, gx, gy, c.w);
+  })();
+  return m;
+};
+CL.sMat = CL.hrt.map((rt, i) => makeSlopeMat(rt, i ? CL.FN : CL.N));
+CL.sScene = new THREE.Scene(); CL.sQuad = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), CL.sMat[0]); CL.sQuad.frustumCulled = false; CL.sScene.add(CL.sQuad);
+// one bake into rt (row `row` under camera cam): direct, or (UBER) heights into the scratch target, then the slope pass
+CL.bakeInto = (rt, cam, row, f) => {
+  if (!UBER){ CL.quad.position.set(0.5, row + 0.5, 0); CL.quad.updateMatrixWorld(); cam.updateMatrixWorld(); renderer.setRenderTarget(rt); renderer.render(CL.scene, cam); return; }
+  renderer.setRenderTarget(CL.hrt[f]); renderer.render(CL.hScene, CL.hCam);
+  CL.sQuad.material = CL.sMat[f]; CL.sQuad.position.set(0.5, row + 0.5, 0); CL.sQuad.updateMatrixWorld(); cam.updateMatrixWorld();
+  renderer.setRenderTarget(rt); renderer.render(CL.sScene, cam);
+};
 CL.cam = new THREE.OrthographicCamera(0, 1, CL.NL, 0, 0.1, 10); CL.cam.position.z = 5;
 // ---- ambient occlusion, baked beside the heights (horizon-based, after GTAO; here on the heightfield, so it is world-fixed: no screen noise, halos or flicker) ----
 // For each texel of a freshly baked level: 8 directions x 3 radii (2, 4 and 8 texels), the horizon's elevation above the LOCAL TANGENT PLANE (the horizon
@@ -2930,7 +2961,12 @@ const makeAoBakeMat = (srcTex, N, rows) => {
       const ampC = Bc.a.w.mul(5).toVar(), wlC = Bc.e.w.toVar(), acc = float(0).toVar();
       // (a loop, not four unrolled calls: four inlined copies of the terrain function made a shader that crashed the GPU process of a test
       // browser and was ~4x the compile on phones)
-      Loop(4, ({i}) => {
+      if (UBER){   // (the eroded terrain: the four points' slopes from the baked texels around - the terrain itself is too costly to re-run here)
+        for (const [dx, dy] of [[-1, -1], [1, -1], [-1, 1], [1, 1]]){
+          const gq = c.yz.mul(0.5).add(rd(dx, 0).yz.mul(0.25)).add(rd(0, dy).yz.mul(0.25)), g = length(gq).mul(SUK);
+          acc.addAssign(smoothstep(SLOPE.rock - 0.06, SLOPE.rock + 0.06, g.div(sqrt(g.mul(g).add(1)))));
+        }
+      } else Loop(4, ({i}) => {
         const fi = float(i), o = vec2(fi.mod(2).sub(0.5), floor(fi.mul(0.5)).sub(0.5)).mul(0.5);
         const g = length(analyticBaked(qc.add(o.mul(s)), s.mul(0.5), wlC, ampC).yz).mul(SUK);   // km per km
         acc.addAssign(smoothstep(SLOPE.rock - 0.06, SLOPE.rock + 0.06, g.div(sqrt(g.mul(g).add(1)))));
@@ -3005,10 +3041,9 @@ function focusTarget(){
 function focusBake(j){
   hc('focus bake');
   U_BK.value = CL.FK0 + j; U_BO.value.copy(CL.forg[j]); QY.set(CL.forg[j].y); U_BN.value = CL.FN; U_BROW.value = j; U_COVON.value = 1;
-  CL.quad.position.set(0.5, j + 0.5, 0); CL.quad.updateMatrixWorld(); CL.fcam.updateMatrixWorld();
   CL.faoQuad.position.set(0.5, j + 0.5, 0); CL.faoQuad.updateMatrixWorld();
   const ac = renderer.autoClear; renderer.autoClear = false;
-  renderer.setRenderTarget(CL.frt); renderer.render(CL.scene, CL.fcam);
+  CL.bakeInto(CL.frt, CL.fcam, j, 1);
   renderer.setRenderTarget(CL.faoRt); renderer.render(CL.faoScene, CL.fcam); renderer.setRenderTarget(null);
   renderer.autoClear = ac; U_BN.value = CL.N;
 }
@@ -3043,9 +3078,8 @@ function focusUpdate(){
 function clipBake(k){
   hc('level bake');
   U_BK.value = k; U_BO.value.copy(CL.org[k]); QY.set(CL.org[k].y);
-  CL.quad.position.set(0.5, k + 0.5, 0); CL.quad.updateMatrixWorld(); CL.cam.updateMatrixWorld();
   const ac = renderer.autoClear; renderer.autoClear = false;
-  renderer.setRenderTarget(CL.rt); renderer.render(CL.scene, CL.cam); renderer.setRenderTarget(null);
+  CL.bakeInto(CL.rt, CL.cam, k, 0); renderer.setRenderTarget(null);
   U_BROW.value = k; U_COVON.value = k <= 9 ? 1 : 0; CL.aoQuad.position.set(0.5, k + 0.5, 0); CL.aoQuad.updateMatrixWorld(); renderer.setRenderTarget(CL.aoRt); renderer.render(CL.aoScene, CL.cam); renderer.setRenderTarget(null);   // (the AO and cast shadow of the level just baked)
   renderer.autoClear = ac;
   CL.baked++;
