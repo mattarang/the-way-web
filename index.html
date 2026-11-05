@@ -640,9 +640,11 @@ function basinB(qx, qy){
 //   plateau      mesa country remaps height into broad tiers (smooth stair: flat treads, rounded risers) - never fine contour strips
 // The GPU's uberH mirrors this; its slope is taken from the height itself (finite differences at the sample spacing: normals = heights).
 // (tuned in the terrain lab, scratchpad lab/: ridged dramatic ranges, strongly warped coasts and ranges, regions of differing relief)
-const UB = {L0: 16, N: 9, warpL: 16, k0: 0.045, m0: 0.2328, zN: 0.127, mtn0: 0.3, mtnA: 0.6, wet: 0.6, tierKm: 0.25,
-  sharpRamp: 2, sharp0: -0.05, sharpM: 1.25, sharpR: 0.6, ero0: 0.35, eroM: 0.8, gain: 0.55, warp0: 4, low0: 0.10, lowA: 0.25, altEro: 0.4,
-  expMu: 1.015, warp2: 0.4, rel0: 0.55, relA: 1.0};   // EXPONENTIALLY DISTRIBUTED gradients (Parberry 2015, JCGT 4(2): real terrain's gradients are exponentially distributed at every scale;
+// (after dandrino/terrain-erosion-3-ways: ONE large, low-frequency warp - it bends ranges and coasts; the finer warp layer smeared ridges into
+// swirls - smooth plain fBm on low ground - billowed |n| folds there were pits - and the classic per-octave gain of 1/2)
+const UB = {L0: 16, N: 9, warpL: 32, k0: 0.045, m0: 0.2328, zN: 0.127, mtn0: 0.3, mtnA: 0.6, wet: 0.6, tierKm: 0.25,
+  sharpRamp: 2, sharp0: 0.2, sharpM: 0.6, sharpR: 0.6, ero0: 0.35, eroM: 0.3, gain: 0.5, warp0: 3, low0: 0.10, lowA: 0.25, altEro: 0.3,
+  expMu: 1.0001, warp2: 0, rel0: 0.55, relA: 1.0};   // EXPONENTIALLY DISTRIBUTED gradients (Parberry 2015, JCGT 4(2): real terrain's gradients are exponentially distributed at every scale;
                   // cited by Sean Murray as shaping No Man's Sky's generator): each lattice point's gradient scaled by mu^-k, k a hash 0..255 (his
                   // magnitude table, mu = 1.02 as in his code), normalized to unit RMS - mostly gentle ground, now and then a steep feature
 UB.expN = 1/Math.sqrt((1 - Math.pow(UB.expMu, -512))/(256*(1 - Math.pow(UB.expMu, -2))));   // (1 / RMS of mu^-k over k = 0..255)
