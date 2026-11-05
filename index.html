@@ -727,8 +727,8 @@ function uberBase(qx, qy, wl, amp, dl, lod){
   return [uberShape(U, wl, amp, m, mesa, rel), U];
 }
 function uberH(qx, qy, wl = 0, amp = 1, dl = null, lod = 0){   // (Rune's terrain: see RU; the CPU copy is the fast fill - no erosion unless RU.fillEro)
-  const P = ruParams(qx, qy, amp), Eb = ruHeight(qx, pmod(qy, SPER), lod, P, false)[0];
-  return ruToH(RU.fillEro ? ruHeight(qx, pmod(qy, SPER), lod, P, true)[0] : Eb, wl, amp, P, Eb);
+  const P = ruParams(qx, qy, amp), r = ruHeight(qx, pmod(qy, SPER), lod, P, RU.fillEro);
+  return ruToH(r[0], wl, amp, P, Math.hypot(r[1], r[2]));
 }
 // ---------- RUNE'S TERRAIN (the eroded terrain's height: the default) ----------
 // Rune Skovbo Johansen's "Advanced Terrain Erosion Filter" Shadertoy (https://www.shadertoy.com/view/wXcfWn; blog.runevision.com/2026/03/
@@ -744,7 +744,7 @@ function uberH(qx, qy, wl = 0, amp = 1, dl = null, lod = 0){   // (Rune's terrai
 // fades to the filter's own fade target (its notion of the mean below that detail), so coarse levels hold what they can and agree with the fine.
 const RU = {km: 32, scale: 0.15, strength: 0.22, gully: 0.5, detail: 1.5, round: [0.1, 0.0, 0.1, 2.0], onset: [1.25, 1.25, 2.8, 1.5], aslope: [0.7, 1.0],
   cell: 0.7, norm: 0.5, oct: 5, lac: 2.0, gain: 0.5, hoff: [-0.65, 0.0], hfreq: 3.0, hamp: 0.125, hoct: 3, hlac: 2.0, hgain: 0.1,
-  center: 0.08, relLow: 0.3, vary: true, fillEro: false, rrK: 13.2, shoreBand: 0.12, shoreK: 0.25};   // shore*: see ruShore   // rrK: the sharpness floor (ruHeight): crests at least ~3 samples round   // vary: the world's variety (relK) on; off = his exact parameters everywhere   // center: how far (Rune units, x the relief) his terrain's mid height sits above our water line (0)   // relLow: lowland relief vs mountain (x the regional relief); fillEro: the CPU fast fill runs the erosion too (lab)
+  center: 0.08, relLow: 0.3, vary: true, fillEro: false, rrK: 13.2, shoreW: 0.5, shoreK: 0.08};   // shore*: see ruShore   // rrK: the sharpness floor (ruHeight): crests at least ~3 samples round   // vary: the world's variety (relK) on; off = his exact parameters everywhere   // center: how far (Rune units, x the relief) his terrain's mid height sits above our water line (0)   // relLow: lowland relief vs mountain (x the regional relief); fillEro: the CPU fast fill runs the erosion too (lab)
 const ruNU = () => RU.km*SUK;   // noise units per Rune unit
 // a lattice of f cells per Rune unit, wrapped: [frequency x, y (cells per Rune unit), cells around, cells along]
 const ruAxis = f => { const U = ruNU(), nx = Math.max(1, Math.round(TU/U*f)), ny = Math.max(1, Math.round(SPER/U*f)); return [nx/(TU/U), ny/(SPER/U), nx, ny]; };
@@ -864,13 +864,13 @@ function ruParams(qx, qy, amp){
   const L = a => a[0] + (a[1] - a[0])*k;
   return {relK, sK: L(RUV.sK), gw: L(RUV.gw), det: L(RUV.det), rr: L(RUV.rr), elev: RUV.el*e, wb, wt};
 }
-// SHORES: waves plane the coast into a gentle profile (beaches, wave-cut platforms; the shoreface's equilibrium profile, Dean 1991: depth ~ x^(2/3)),
-// and sediment fills the gullies there. The zone is found on the SMOOTH terrain (his base with every gully octave at its fade target, Eb: gentle,
-// so +-shoreBand km of it spans a few hundred metres across): inside it the height eases to that smooth height x shoreK (a quarter of its slope) -
-// a beach ramp above the water line and a shallow shelf below it; outside it nothing changes. km heights above the water line in, out.
-const ruShore = (H, Hb) => { const w = 1 - smooth(0, RU.shoreBand, Math.abs(Hb)); return H + (Hb*RU.shoreK - H)*w; };
-const ruAboveKm = (E, P) => (E - 0.5 + RU.center*P.relK + P.elev)*RU.km;
-const ruToH = (E, wl, amp, P, Eb = E) => wl + ruShore(ruAboveKm(E, P), ruAboveKm(Eb, P))/Math.max(amp, 0.05);
+// SHORES: waves plane the coast into a gentle profile (beaches and wave-cut platforms at the foot of cut-back cliffs; the shoreface's equilibrium
+// profile, Dean 1991). A beach is land cut back HORIZONTALLY from the real shoreline, so it needs the distance to it: d = H / slope (the
+// terrain's own height above the water line over its own slope from his filter - exact on a plane), never more than H / shoreK. Within shoreW
+// km of the shoreline the ground becomes a ramp of slope shoreK (a beach above the water, a shallow shelf below), easing back to the terrain by
+// shoreW (from a quarter of it: a concave profile, beach into land, not a beach under a cliff); ground already gentler than the ramp is untouched (d = H / shoreK gives back H). H km above the water line, g its slope (km/km).
+const ruShore = (H, g) => { const d = H/Math.max(g, RU.shoreK), w = 1 - smooth(0.25*RU.shoreW, RU.shoreW, Math.abs(d)); return H + (RU.shoreK*d - H)*w; };
+const ruToH = (E, wl, amp, P, g = 0) => wl + ruShore((E - 0.5 + RU.center*P.relK + P.elev)*RU.km, g)/Math.max(amp, 0.05);
 function uberHOld(qx, qy, wl = 0, amp = 1, dl = null, lod = 0){
   const [m, sharp, ero, gainK, warpA, mesa, rel] = uberMacro(qx, qy, amp, dl);
   return uberShape(uberN(qx, qy, lod, sharp, ero, gainK, warpA), wl, amp, m, mesa, rel);   // (no basin layer: its +-0.4 regional steps drew walls round lakes and flat plateaus)
@@ -2247,13 +2247,13 @@ function makeLib(qy = null){
     const pa = vec4(relK, vk(1, ...RUV.sK), vk(RU.gully, ...RUV.gw), vk(RU.detail, ...RUV.det)).toVar();   // (amplitude, strength, gully weight, detail)
     const pb = vec4(vk(RU.round[0], ...RUV.rr), wb, wt, 0).toVar();   // (ridge rounding, scale blend)
     const qe = vec2(q.x, ym(q.y, SPER)).toVar();
-    const r = (ero ? tRuHeight : tRuHeightBase)(qe, lod, pa, pb).toVar(), rb = (ero ? tRuHeightBase(qe, lod, pa, pb) : r).toVar();   // (rb: the smooth terrain, ruShore)
+    const r = (ero ? tRuHeight : tRuHeightBase)(qe, lod, pa, pb).toVar();
     const ampC = max(amp, 0.05).toVar();
-    const kmU = U_RUNU.div(SUK), above = E => E.sub(0.5).add(relK.mul(U_RUC)).add(elev).mul(kmU);
-    const Hk = above(r.x).toVar(), Hb = above(rb.x).toVar(), wS = smoothstep(0, RU.shoreBand, abs(Hb)).oneMinus().toVar();   // (ruShore)
-    const h = wl.add(mix(Hk, Hb.mul(RU.shoreK), wS).div(ampC)).toVar();
+    const Hk = r.x.sub(0.5).add(relK.mul(U_RUC)).add(elev).mul(U_RUNU.div(SUK)).toVar(), gm = length(r.yz).toVar();   // (ruShore)
+    const dS = Hk.div(max(gm, RU.shoreK)).toVar(), wS = smoothstep(0.25*RU.shoreW, RU.shoreW, abs(dS)).oneMinus().toVar();
+    const h = wl.add(mix(Hk, dS.mul(RU.shoreK), wS).div(ampC)).toVar();
     if (hOnly) return vec3(h, floor(r.w).div(255).mul(2).sub(1), fract(r.w).div(0.998).mul(2).sub(1));
-    return vec3(h, mix(r.yz, rb.yz.mul(RU.shoreK), wS).div(ampC.mul(SUK)));
+    return vec3(h, mix(r.yz, r.yz.div(max(gm, RU.shoreK)).mul(RU.shoreK), wS).div(ampC.mul(SUK)));
   };
   const analyticBaked = (q, lod, wl, amp, hOnly = false) => {   // (hOnly: the bake - the full erosion; elsewhere the no-data fallback: its base)
     const ha = (UBER ? uberAt(q, lod, wl, amp, regions(q, wl), hOnly, hOnly) : terrainAt(q, lod, wl, amp, regions(q, wl))).toVar(), hh = ha.x;
