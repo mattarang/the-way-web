@@ -249,6 +249,7 @@ button:disabled{opacity:.45}
   <button id="b-exact" class="perfbtn" type="button">Exact near ground: off (experimental)</button>
   <button id="b-hmap" class="perfbtn" type="button">Heightmap debug: off</button>
   <button id="b-hide" class="perfbtn" type="button">Hide (profiling): nothing</button>
+  <button id="b-ter" class="perfbtn" type="button">Terrain: classic</button>
   <button id="b-res" class="perfbtn" type="button">Resolution: auto</button>
   <button id="b-aa" class="perfbtn" type="button">Antialiasing (MSAA 4x): on</button>
   <button id="b-prof" class="perfbtn" type="button">Profile this view (~25 s, hold still)</button>
@@ -625,6 +626,88 @@ const WB_L = 32, WB_UP = 0.3, WB_DN = 0.5, WB_W = 0.06;
 function basinB(qx, qy){
   return pnoise(qx/WB_L + 3.1, pmod(qy, 256*WB_L)/WB_L + 1.7, TU/WB_L, qy/DWU) + 0.5*pnoise(qx/(WB_L/2) + 5.3, pmod(qy, 128*WB_L)/(WB_L/2) + 2.9, 2*TU/WB_L, qy/DWU);
 }
+// ---------- UBER TERRAIN (?terrain=uber) ----------
+// One fractal whose CHARACTER varies continuously across the world, instead of fixed octaves with landform layers switched on by thresholds
+// (each switch a place for a hard line): "Uber Noise" (Sean Murray, GDC 2017, Continuous World Generation in No Man's Sky) on Inigo Quilez's
+// derivative fBm. Field contract (threejs-procedural-fields):
+//   coordinates  q (noise units around x along; periodic: every octave's cell divides TU and 256 cells divide SPER)
+//   macro fields mountain mask m (the lowland/mountain mask, ~30 km), sharpness (rounded <-> ridged crests: the terrace-region field rA, the
+//                ridge dial, more on mountains), erosion (more on mountains), roughness (the gain dial), warp (the warp dial), plateau (mesa dial)
+//   form         9 gradient-noise octaves, 16 units (~16 km) down to 1/16 unit (~60 m); each shaped between billowed |n| and ridged -|n| by
+//                sharpness with ROUNDED crests (never a knife edge), and damped by the slope accumulated so far (IQ's erosion: detail settles
+//                in valleys and on gentle ground, crests stay sharp); coordinates domain-warped
+//   filtering    an octave fades to its mean (0) once its cell spans under 4 samples (lod), its crest rounding widens with lod: no aliasing
+//   plateau      mesa country remaps height into broad tiers (smooth stair: flat treads, rounded risers) - never fine contour strips
+// The GPU's uberH mirrors this; its slope is taken from the height itself (finite differences at the sample spacing: normals = heights).
+const UB = {L0: 16, N: 9, warpL: 8, k0: 0.06, m0: 0.2328, zN: 0.127, mtn0: 0.25, mtnA: 0.28, wet: 0.6, tierKm: 0.25,
+  sharpRamp: 2, sharp0: -0.45, sharpM: 1.1, sharpR: 0.6, ero0: 0.35, eroM: 1.4, gain: 0.5, warp0: 0.6, low0: 0.10, lowA: 0.14, altEro: 0.7,
+  expMu: 1.02};   // EXPONENTIALLY DISTRIBUTED gradients (Parberry 2015, JCGT 4(2): real terrain's gradients are exponentially distributed at every scale;
+                  // cited by Sean Murray as shaping No Man's Sky's generator): each lattice point's gradient scaled by mu^-k, k a hash 0..255 (his
+                  // magnitude table, mu = 1.02 as in his code), normalized to unit RMS - mostly gentle ground, now and then a steep feature
+UB.expN = 1/Math.sqrt((1 - Math.pow(UB.expMu, -512))/(256*(1 - Math.pow(UB.expMu, -2))));   // (1 / RMS of mu^-k over k = 0..255)
+const expMag = (X, Y, k) => UB.expN*Math.pow(UB.expMu, -((((Math.imul(X, 73856093) ^ Math.imul(Y, 19349663) ^ Math.imul(k, 83492791)) >>> 8) & 255)));   // (the character: see uberMacro/uberShape)
+function pnoiseD(x, y, nx, w, mag = false){   // Perlin with its slope in lattice units: [value, d/dx, d/dy] (mirrors the GPU's tPnoiseD; mag: tPnoiseDM)
+  const fx = Math.floor(x), fy = Math.floor(y), dx = x - fx, dy = y - fy;
+  const X0 = pmod(pmod(fx, nx), 256), X1 = pmod(pmod(fx + 1, nx), 256), Y0 = pmod(fy, 256), Y1 = pmod(fy + 1, 256);
+  layerSet(w);
+  const T = PERLIN_TAB, one = (X, Y, ox, oy, k, mg) => { const i = ((((Y + oy) & 255) << 8) + ((X + ox) & 255))*4, f = mg ? expMag(X, Y, k) : 1; return [_pd(T[i])*f, _pd(T[i + 1])*f, _pd(T[i + 2])*f]; };
+  const c = (X, Y) => { const a = one(X, Y, _l0x, _l0y, _lk, mag); if (_lW <= 0) return a;
+    const b = one(X, Y, _l1x, _l1y, _lk + 1, mag); return [0, 1, 2].map(j => (a[j]*(1 - _lW) + b[j]*_lW)*_lnrm); };
+  const a = c(X0, Y0), b = c(X1, Y0), cc = c(X0, Y1), d = c(X1, Y1);
+  const va = a[0]*dx + a[1]*dy + a[2], vb = b[0]*(dx - 1) + b[1]*dy + b[2], vc = cc[0]*dx + cc[1]*(dy - 1) + cc[2], vd = d[0]*(dx - 1) + d[1]*(dy - 1) + d[2];
+  const u = dx*dx*dx*(dx*(dx*6 - 15) + 10), v = dy*dy*dy*(dy*(dy*6 - 15) + 10), du = 30*dx*dx*(dx*(dx - 2) + 1), dv = 30*dy*dy*(dy*(dy - 2) + 1);
+  const k1 = vb - va, k2 = vc - va, k3 = va - vb - vc + vd;
+  return [va + k1*u + k2*v + k3*u*v,
+    a[0] + (b[0] - a[0])*u + (cc[0] - a[0])*v + (a[0] - b[0] - cc[0] + d[0])*u*v + du*(k1 + k3*v),
+    a[1] + (b[1] - a[1])*u + (cc[1] - a[1])*v + (a[1] - b[1] - cc[1] + d[1])*u*v + dv*(k2 + k3*u)];
+}
+function uberN(qx, qy, lod, sharp, ero, gainK, warpA){
+  const w = qy/DWU;
+  let x = qx, y = qy;
+  if (warpA > 0){ const L = UB.warpL;
+    x += warpA*pnoise(qx/L + 3.3, pmod(qy, 256*L)/L + 1.1, TU/L, w); y += warpA*pnoise(qx/L + 17.9, pmod(qy, 256*L)/L + 9.4, TU/L, w); }
+  let sum = 0, a = 1, norm = 0, dsx = 0, dsy = 0;
+  for (let i = 0; i < UB.N; i++){
+    const L = UB.L0/Math.pow(2, i), wt = lod > 0 ? Math.max(0, Math.min(1, L/(2*lod) - 1)) : 1;
+    if (wt > 0){
+      const kf = Math.max(UB.k0, 4*lod/L), [n, gx, gy] = pnoiseD(x/L + 3.7 + 7.1*i, pmod(y, 256*L)/L + 1.9 + 5.3*i, TU/L, w, UB.expMu > 1);
+      const sq = Math.sqrt(n*n + kf*kf), b = sq - kf, mb = Math.sqrt(UB.m0*UB.m0 + kf*kf) - kf, db = n/sq;
+      const as = Math.abs(sharp)*Math.min(1, i/UB.sharpRamp);   // (the broadest octave stays plain relief; the crest shaping ramps in over the next ones)
+      const v = n*(1 - as) + as*2*(sharp > 0 ? mb - b : b - mb), dvn = (1 - as) + as*2*(sharp > 0 ? -db : db);
+      dsx += dvn*gx*a*wt; dsy += dvn*gy*a*wt;
+      // ALTITUDE EROSION (NMS's Uber noise): the detail's strength follows the height built so far - smooth, filled valley floors, rugged highs
+      const alt = i ? 1 - UB.altEro*(1 - smooth(-1.2, 1.2, sum/(norm*UB.zN))) : 1;
+      sum += a*v*wt*alt/(i ? 1 + ero*(dsx*dsx + dsy*dsy) : 1);   // (the broadest octave is the land's form itself: undamped; erosion thins the detail on it)
+    }
+    norm += a; a *= gainK;
+  }
+  return sum/norm;
+}
+// the macro fields at q: [mountain mask m, sharpness, erosion, gain, warp, mesa] (mirrors the GPU's uberMacro)
+function uberMacro(qx, qy, amp, dl){
+  const m = lowMask(qx, qy, amp), [rA] = lfRegions(qx, qy);
+  const ridge = dl ? dl[3] : 0, gain = dl ? dl[1] : 1, warp = dl ? dl[0] : 0, mesa = dl ? dl[2] : 0;
+  const sharp = Math.max(-1, Math.min(1, UB.sharp0 + UB.sharpM*m + 0.9*ridge + UB.sharpR*rA));
+  return [m, sharp, UB.ero0 + UB.eroM*m, UB.gain*Math.sqrt(Math.max(0.5, Math.min(1.4, gain))), UB.warp0 + 2*warp, mesa];
+}
+// The noise value U -> normalized height h: ONE continuous field of height above the water line, d = base + relief x z (z: U in standard
+// deviations), both growing smoothly with the mountain mask m - lowland (base 0.10, relief 0.06: rolling hills, the odd pond) to mountain (base
+// 0.25, relief 0.28: ranges, lakes in the valley floors). Wetter biomes (a higher water line wl) sit lower, so more of them is water. No second
+// datum to switch to (a lowland near the water line next to absolute mountains drew cliffs where the mask turned). Mountains reach ~2.2 km
+// (fM, eased in above the water); mesa country remaps into broad tiers.
+function uberShape(U, wl, amp, m, mesa){
+  const z = U/UB.zN, mm = m*m*(3 - 2*m);
+  let d = UB.low0 + (UB.mtn0 - UB.low0)*mm + (UB.lowA + (UB.mtnA - UB.lowA)*mm)*z - UB.wet*(wl - 0.25);
+  if (d > 0){ const fM = Math.max(1, (2.2 + 0.2*amp)/Math.max(amp, 0.05)); d *= 1 + (fM - 1)*smooth(0, 0.12, d)*mm; }
+  let h = wl + d;
+  if (mesa > 0 && d > 0){ const NT = Math.max(4, amp/UB.tierKm), x = d*NT, f = Math.floor(x), u = x - f, p = 3, st = Math.pow(u, p)/(Math.pow(u, p) + Math.pow(1 - u, p));
+    h = h + (wl + (f + st)/NT - h)*mesa*smooth(0, 0.05, d); }
+  return h;
+}
+function uberH(qx, qy, wl = 0, amp = 1, dl = null, lod = 0){
+  const [m, sharp, ero, gainK, warpA, mesa] = uberMacro(qx, qy, amp, dl);
+  return uberShape(uberN(qx, qy, lod, sharp, ero, gainK, warpA), wl, amp, m, mesa);   // (no basin layer: its +-0.4 regional steps drew walls round lakes and flat plateaus)
+}
 function basinBias(qx, qy, wl){
   if (wl <= 0.002) return 0;
   const t = -0.3 + 0.5*wl, sB = smooth(t + WB_W, t - WB_W, basinB(qx, qy));
@@ -709,6 +792,7 @@ function landforms(qx, qy, h, wl, det = 0, amp = 1, mesa = 0, guideAt = null, gu
   return h;
 }
 function terrainH(qx, qy, wl = 0, amp = 1, dl = null, guideOnly = false){
+  if (UBER && !guideOnly) return uberH(qx, qy, wl, amp, dl);
   const d = [1.75*grid1(qx, qy)], dsoft = [];   // (dsoft: the same octaves with rounded crests, which the terraces follow)
   // dials (mirrors the shader): domain warp of the fold octaves, their gain about their mean, ridge (extra fine-octave gain)
   let wx = qx, wy = qy; const gW = dl ? dl[0] : 0, gG = dl ? dl[1] : 1, gR = dl ? dl[3] : 0;
@@ -765,6 +849,8 @@ const ARCH_DIAL = {'Seventh chamber parkland':[0,1,0,0], 'Grassland':[.1,.85,0,0
   'Salt marsh':[0,.6,0,0], 'Heather moor':[.45,1,0,.15], 'Amber savanna':[.2,.75,.25,0], 'Autumn forest':[.25,1,0,.1], 'Dark fen':[.1,.65,0,0],
   'Mesa country':[.3,1.2,1,.3], 'Blue glacier':[.4,1.1,0,.6], 'Obsidian shards':[.7,1.4,.3,.9]};
 const DIALS = !/[?&]dials=0/.test(location.search);
+// ?terrain=uber: the terrain from one continuously-varying fractal (uberH, below) instead of the example's octaves + landform layers
+const UBER = /[?&]terrain=uber\b/.test(location.search) || (() => { try { return localStorage.getItem('wayTerrain') === 'uber'; } catch (e) { return false; } })();
 let DEBUG_VIEWS = /[?&]dbg\b/.test(location.search);   // (also switched on at run time by the debug button: enableDebugViews rebuilds the materials with them)
 //   // the terrain's debug views are compiled into its shader only with ?dbg (they cost registers on every pixel)
 const ARCH_POS = {'Seventh chamber parkland':[.55,.55,.12,0], 'Grassland':[.5,.5,.2,.02], 'Old forest':[.42,.82,.4,.05], 'Dune sea':[.95,.04,.25,.08],
@@ -1515,10 +1601,12 @@ function makeLib(qy = null){
   // the noise's layers (see DWU): corners of a cell blended between this layer's table window and the next one's
   const tw = q => max(U.uWB.add(yAbs(q.y).div(DWU)), 0);
   const tShX = k => k.mul(113).add(floor(k.div(256)).mul(71)).mod(256), tShY = k => k.mul(61).add(floor(k.div(256)).mul(29)).mod(256);
-  const corners4 = (X0, X1, Y0, Y1, w) => {
+  const tExpMag = (X, Y, kk) => { const h = uint(int(X)).mul(uint(73856093)).bitXor(uint(int(Y)).mul(uint(19349663))).bitXor(uint(int(kk)).mul(uint(83492791)));
+    return exp2(float(h.shiftRight(uint(8)).bitAnd(uint(255))).mul(-Math.log2(UB.expMu))).mul(UB.expN); };
+  const corners4 = (X0, X1, Y0, Y1, w, mag = false) => {
     if (!LAYERS) return [[X0, Y0], [X1, Y0], [X0, Y1], [X1, Y1]].map(([X, Y]) => perlinN.load(ivec2(int(X), int(Y))).rgb.mul(2).sub(1).toVar());   // ?layers=0: the single table (for timing the layers)
     const k = floor(w).toVar(), W = quintic(clamp(w.sub(k).sub(1 - WTR).div(WTR), 0, 1)).toVar();
-    const ld = (X, Y, kk) => perlinN.load(ivec2(int(X.add(tShX(kk)).mod(256)), int(Y.add(tShY(kk)).mod(256)))).rgb.mul(2).sub(1);
+    const ld = (X, Y, kk) => { const c0 = perlinN.load(ivec2(int(X.add(tShX(kk)).mod(256)), int(Y.add(tShY(kk)).mod(256)))).rgb.mul(2).sub(1); return mag ? c0.mul(tExpMag(X, Y, kk)) : c0; };
     const c = [ld(X0, Y0, k).toVar(), ld(X1, Y0, k).toVar(), ld(X0, Y1, k).toVar(), ld(X1, Y1, k).toVar()];
     If(W.greaterThan(0), () => {
       const k1 = k.add(1), nrm = float(1).div(sqrt(W.oneMinus().mul(W.oneMinus()).add(W.mul(W))));
@@ -1531,6 +1619,19 @@ function makeLib(qy = null){
     const i = floor(p).toVar(), f = p.sub(i).toVar();
     const X0 = i.x.mod(nx).mod(256).toVar(), X1 = i.x.add(1).mod(nx).mod(256).toVar(), Y0 = i.y.mod(256).toVar(), Y1 = i.y.add(1).mod(256).toVar();
     const [a, b, c, d] = corners4(X0, X1, Y0, Y1, w);
+    const va = dot(a.xy, f).add(a.z).toVar(), vb = dot(b.xy, f.sub(vec2(1, 0))).add(b.z).toVar();
+    const vc = dot(c.xy, f.sub(vec2(0, 1))).add(c.z).toVar(), vd = dot(d.xy, f.sub(1)).add(d.z).toVar();
+    const u = quintic(f).toVar(), du = quinticD(f).toVar();
+    const k1 = vb.sub(va).toVar(), k2 = vc.sub(va).toVar(), k3 = va.sub(vb).sub(vc).add(vd).toVar();
+    return vec3(va.add(k1.mul(u.x)).add(k2.mul(u.y)).add(k3.mul(u.x).mul(u.y)),
+      a.xy.add(b.xy.sub(a.xy).mul(u.x)).add(c.xy.sub(a.xy).mul(u.y)).add(a.xy.sub(b.xy).sub(c.xy).add(d.xy).mul(u.x.mul(u.y)))
+        .add(du.mul(vec2(k1.add(k3.mul(u.y)), k2.add(k3.mul(u.x))))));
+  });
+  // (the same with exponentially distributed gradient magnitudes: the uber terrain's octaves, see UB.expMu)
+  const tPnoiseDM = fnL('pnoiseDM', 'vec3', ['p:vec2', 'nx:float', 'w:float'], ([p, nx, w]) => {
+    const i = floor(p).toVar(), f = p.sub(i).toVar();
+    const X0 = i.x.mod(nx).mod(256).toVar(), X1 = i.x.add(1).mod(nx).mod(256).toVar(), Y0 = i.y.mod(256).toVar(), Y1 = i.y.add(1).mod(256).toVar();
+    const [a, b, c, d] = corners4(X0, X1, Y0, Y1, w, true);
     const va = dot(a.xy, f).add(a.z).toVar(), vb = dot(b.xy, f.sub(vec2(1, 0))).add(b.z).toVar();
     const vc = dot(c.xy, f.sub(vec2(0, 1))).add(c.z).toVar(), vd = dot(d.xy, f.sub(1)).add(d.z).toVar();
     const u = quintic(f).toVar(), du = quinticD(f).toVar();
@@ -1810,8 +1911,56 @@ function makeLib(qy = null){
   const terrainAt = (q, lod, wl, amp, rg) => tTerrainHD(q, lod, wl, amp, rg.mn, rg.rA, rg.rB, rg.bas, rg.dl || vec4(0, 1, 0, 0));
   // the terrain function in the baked layout: vec4(H km above sea level (beds below it), dH/dq (km per noise unit), h). The bake stores exactly
   // this; everything else uses it only to stand in where no baked level covers a point
+  // ---- UBER TERRAIN (?terrain=uber; mirrors uberN / uberMacro / uberShape in JS: see there) ----
+  const tUberN = fnL('uberN', 'float', ['q:vec2', 'lod:float', 'sharp:float', 'ero:float', 'gainK:float', 'warpA:float'], ([q, lod, sharp, ero, gainK, warpA]) => {
+    const w = tw(q), Lw = UB.warpL;
+    const x = q.x.add(warpA.mul(tPnoiseD(vec2(q.x.div(Lw).add(3.3), ym(q.y, 256*Lw).div(Lw).add(1.1)), TU/Lw, w).x)).toVar();
+    const y = q.y.add(warpA.mul(tPnoiseD(vec2(q.x.div(Lw).add(17.9), ym(q.y, 256*Lw).div(Lw).add(9.4)), TU/Lw, w).x)).toVar();
+    const sum = float(0).toVar(), a = float(1).toVar(), norm = float(0).toVar(), ds = vec2(0).toVar(), ab = abs(sharp).toVar();
+    for (let i = 0; i < UB.N; i++){
+      const L = UB.L0/Math.pow(2, i), wt = clamp(float(L).div(max(lod, 1e-6).mul(2)).sub(1), 0, 1).toVar();
+      If(wt.greaterThan(0), () => {
+        const kf = max(float(UB.k0), lod.mul(4/L)).toVar();
+        const nd = (UB.expMu > 1 ? tPnoiseDM : tPnoiseD)(vec2(x.div(L).add(3.7 + 7.1*i), ym(y, 256*L).div(L).add(1.9 + 5.3*i)), TU/L, w).toVar();
+        const sq = sqrt(nd.x.mul(nd.x).add(kf.mul(kf))).toVar(), b = sq.sub(kf), mb = sqrt(kf.mul(kf).add(UB.m0*UB.m0)).sub(kf), db = nd.x.div(sq);
+        const as = ab.mul(Math.min(1, i/UB.sharpRamp)).toVar(), pos = sharp.greaterThan(0);
+        const v = nd.x.mul(as.oneMinus()).add(as.mul(2).mul(select(pos, mb.sub(b), b.sub(mb))));
+        const dvn = as.oneMinus().add(as.mul(2).mul(select(pos, db.negate(), db)));
+        ds.addAssign(nd.yz.mul(dvn.mul(a).mul(wt)));
+        if (i === 0) sum.addAssign(a.mul(v).mul(wt));
+        else {
+          const alt = float(1).sub(float(UB.altEro).mul(smoothstep(-1.2, 1.2, sum.div(norm.mul(UB.zN))).oneMinus()));
+          sum.addAssign(a.mul(v).mul(wt).mul(alt).div(ero.mul(dot(ds, ds)).add(1)));
+        }
+      });
+      norm.addAssign(a); a.mulAssign(gainK);
+    }
+    return sum.div(norm);
+  });
+  const tUberShape = (U, wl, amp, m, mesa) => {
+    const z = U.div(UB.zN), mm = m.mul(m).mul(m.mul(-2).add(3)).toVar();
+    const d = float(UB.low0).add(mm.mul(UB.mtn0 - UB.low0)).add(mm.mul(UB.mtnA - UB.lowA).add(UB.lowA).mul(z)).sub(wl.sub(0.25).mul(UB.wet)).toVar();
+    If(d.greaterThan(0), () => { const fM = max(float(1), amp.mul(0.2).add(2.2).div(max(amp, 0.05))); d.mulAssign(fM.sub(1).mul(smoothstep(0, 0.12, d)).mul(mm).add(1)); });
+    const h = wl.add(d).toVar();
+    If(mesa.greaterThan(0).and(d.greaterThan(0)), () => {
+      const NT = max(float(4), amp.div(UB.tierKm)), xx = d.mul(NT), f = floor(xx), u = xx.sub(f), up = pow(u, 3), dn = pow(u.oneMinus(), 3);
+      h.addAssign(wl.add(f.add(up.div(up.add(dn))).div(NT)).sub(h).mul(mesa).mul(smoothstep(0, 0.05, d)));
+    });
+    return h;
+  };
+  // height and its slope: three evaluations, the slope by differences at half the sample spacing (normals follow the heights exactly)
+  const uberAt = (q, lod, wl, amp, rg) => {
+    const t = clamp(rg.mn.x.add(clamp(amp.sub(1.5).div(2.5), -0.4, 0.6).mul(0.35)).add(0.25).div(0.3), 0, 1), m = t.mul(t).mul(t.mul(-2).add(3)).toVar();
+    const dl = rg.dl || vec4(0, 1, 0, 0);
+    const sharp = clamp(m.mul(UB.sharpM).add(UB.sharp0).add(dl.w.mul(0.9)).add(rg.rA.x.mul(UB.sharpR)), -1, 1).toVar();
+    const ero = m.mul(UB.eroM).add(UB.ero0).toVar(), gainK = sqrt(clamp(dl.y, 0.5, 1.4)).mul(UB.gain).toVar(), warpA = dl.x.mul(2).add(UB.warp0).toVar();
+    const e = max(lod.mul(0.5), 2e-4).toVar();
+    const H = lq => tUberShape(tUberN(lq, lod, sharp, ero, gainK, warpA), wl, amp, m, dl.z);
+    const h0 = H(q).toVar(), hx = H(q.add(vec2(e, 0))), hy = H(q.add(vec2(0, e)));
+    return vec3(h0, hx.sub(h0).div(e), hy.sub(h0).div(e));
+  };
   const analyticBaked = (q, lod, wl, amp) => {
-    const ha = terrainAt(q, lod, wl, amp, regions(q, wl)).toVar(), hh = ha.x;
+    const ha = (UBER ? uberAt(q, lod, wl, amp, regions(q, wl)) : terrainAt(q, lod, wl, amp, regions(q, wl))).toVar(), hh = ha.x;
     return vec4(select(hh.greaterThanEqual(wl), amp.mul(hh.sub(wl)), tBedDepth(amp.mul(wl.sub(hh))).negate()), ha.yz.mul(amp.mul(bedSlope(amp.mul(wl.sub(hh))))), clamp(hh, -4, 64));   // (the 'no data' marker is w = 99: tests use > 98 - a test at 50 threw away real heights of the flattest biomes, h up to ~57)
   };
   // THE ground for anything at q, dNoise from the camera: the baked data (the levels the pixels read there), else the analytic stand-in as that
@@ -6418,6 +6567,8 @@ $('b-close').addEventListener('click', () => { el.sheet.hidden = true; });
 // the debug sheet: its own short menu (opened from Places), so testing doesn't mean scrolling the place list each time
 $('b-dbgm').addEventListener('click', () => { el.sheet.hidden = true; $('dsheet').hidden = false; });
 $('b-dclose').addEventListener('click', () => { $('dsheet').hidden = true; });
+$('b-ter').textContent = 'Terrain: ' + (UBER ? 'NEW (uber noise)' : 'classic') + ' (tap: reloads)';
+$('b-ter').addEventListener('click', () => { try { localStorage.setItem('wayTerrain', UBER ? 'classic' : 'uber'); } catch (e) {} location.reload(); });
 $('b-res').addEventListener('click', () => {
   resFix = RES_OPTS[(RES_OPTS.indexOf(resFix) + 1) % RES_OPTS.length];
   const nat = window.devicePixelRatio || 1;
