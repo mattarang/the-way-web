@@ -545,6 +545,8 @@ const EX_CELL = 0.128, EX_Z = 31.4, EX_Q = [1, 5, 25, 125];
 // measured means (400k samples of this very noise, tools/mean.js): what each octave and landform averages to. A feature finer than a baked level's
 // samples fades to ITS MEAN there, so the far ground keeps its average height: fading to anything else (0.23 for every octave, 0 for valleys and
 // mounds) raised or sank whole regions by tens to hundreds of metres as levels handed over, and the dials' gain "about the mean" shifted heights too
+// the finest layer's fold width and scale: the q = 5 octave's fold (sabs(n, 0.4), mean OCT_MEAN[5]) scaled to the old layer's mean
+const GRID_K = 0.4, GRID_S = 0.2223/0.0825;
 const OCT_MEAN = {1: 0.2223, 5: 0.0825, 25: 0.1747, 125: 0.2182}, ABS_MEAN = 0.2328;   // sabs(n, 2/Q) per octave (q = 1: |corner offset|); |n| (= the rounded-crest version's mean)
 const VALLEY_MEAN = 0.3064, MOUND_MEAN = 0.8471;   // (mounds: the gaussian windowed to zero by 1.1 cells, see landforms; measured numerically)
 //   // E[exp(-(n/valleyW)^2)]; E[sum of mound bumps] = 0.75 (mean height) * pi R^2 / E (area of one) per cell
@@ -596,13 +598,9 @@ function pnoise(x, y, nx, w, tr){
 // a value per grid point, linearly interpolated by the mesh. Evaluating it continuously instead shows the noise's
 // smooth folds as worm-like shapes, so it is sampled at grid points here too, eased between them (quintic: a slope that is
 // continuous, so the baked gradient - the shading - matches the baked height; bilinear gave a slope that jumps at every grid line).
-function grid1(qx, qy){
-  layerSet(qy/DWU);
-  const L = EX_CELL, x = qx/L, y = pmod(qy, 256*L)/L, fx = Math.floor(x), fy = Math.floor(y), dx = x - fx, dy = y - fy, nx = TU/L;
-  const X0 = pmod(pmod(fx, nx), 256), X1 = pmod(pmod(fx + 1, nx), 256), Y0 = pmod(fy, 256), Y1 = pmod(fy + 1, 256);
-  const b = (X, Y) => Math.abs(cornerL(X, Y, 2)), ux = dx*dx*dx*(dx*(dx*6 - 15) + 10), uy = dy*dy*dy*(dy*(dy*6 - 15) + 10);
-  const a0 = b(X0, Y0) + (b(X1, Y0) - b(X0, Y0))*ux, a1 = b(X0, Y1) + (b(X1, Y1) - b(X0, Y1))*ux;
-  return a0 + (a1 - a0)*uy;
+function grid1(qx, qy){   // the finest layer: a fold of gradient noise (see the GPU's: value noise drew a grid of straight lines)
+  const L = EX_CELL;
+  return GRID_S*sabs(pnoise(qx/L + 7.7, pmod(qy, 256*L)/L + 3.3, TU/L, qy/DWU), GRID_K);
 }
 // Lowlands: the example is mountains everywhere. A regional mask (~30 km cells) blends to gently rolling lowland
 // just above the biome's water line (the odd pond), from softened q = 1, 5 and 25 layers.
@@ -639,11 +637,15 @@ function basinBias(qx, qy, wl){
 // (cragS 0.6 and mesaK 0.3 were tuned on transects, tools/pspike2.js: they cut isolated spires 0.3 -> 0 per km2 and ground over 65 deg 0.48% -> 0.27% on 90 unseen sites, relief unchanged)
 // (terCreep 1: the fine creases are taken off the terraces entirely. At 0.55 the 45% left on each shelf tilted a quarter to a third of the
 // terraced hillside back into the slope - a trench at every wall's foot, a lip at its edge (baked-level profiles at 611 km: 25-35% -> 1.5%).)
+// crags (gullies between rock buttresses) on high ground only where the smooth form is this steep (km per km: ~17-31 degrees): gully-and-
+// buttress topography is cut into steep rock faces (rockfall and debris flows need the slope), not into gentle high plains - which drew rows of
+// thin sharp ridges across smooth snowfields and steppe
+const CRAG_STEEP = [0.3, 0.6];
 const LF = {valleyD: 0.35, valleyW: 0.14, valleyL: 8, moundA: 0.2, moundC: 1.6, moundR: 0.45, moundE: 0.6, moundJ: 0.9, moundAng: 0.5, terN: 18, tierKm: 0.12, terK: 0.28, mesaW: 1, mesaK: 0.3, cragS: 0.6, terCreep: 1.0, bedVar: 1.1, cragA: [0.06, 0.03, 0.015, 0.007], cragL: [0.4, 0.2, 0.1, 0.05], cragD: 0.3, cragW: 0.12, cragWL: 0.8}   // (crags: four ridged octaves on warped coordinates)
 function lfRegions(qx, qy){
   return [pnoise(qx/32 + 11.3, pmod(qy, 256*32)/32 + 4.1, 5, qy/DWU), pnoise(qx/32 + 19.7, pmod(qy, 256*32)/32 + 8.3, 5, qy/DWU)];
 }
-function landforms(qx, qy, h, wl, det = 0, amp = 1, mesa = 0, guideAt = null, guideOnly = false){   // guideAt(x, y): the terraces' guide elsewhere (its slope)
+function landforms(qx, qy, h, wl, det = 0, amp = 1, mesa = 0, guideAt = null, guideOnly = false, preAt = null){   // preAt(x, y): this function's input height elsewhere (the crags' slope gate)   // guideAt(x, y): the terraces' guide elsewhere (its slope)
   const [rA, rB] = lfRegions(qx, qy);
   const hrPre = h - wl;   // (the crags' high-ground weight is measured before the valleys and mounds, as on the GPU)
   const wS = Math.max(smooth(0.1, 0.28, rA), mesa*LF.mesaW), wV = smooth(0.05, -0.25, rB)*(1 - 0.5*wS), wM = smooth(0.12, 0.3, rB);
@@ -695,7 +697,10 @@ function landforms(qx, qy, h, wl, det = 0, amp = 1, mesa = 0, guideAt = null, gu
   }
   // crags: sharp V gullies between rounded buttresses, on the steep tier risers (zero on the ledges and at the lip)
   // and on high mountain ground
-  const rw = Math.max(riser*0.35, smooth(0.4, 0.85, hrPre)*0.8);   // (risers' crags at 0.35, as on the GPU)
+  // (high ground only where the smooth form is steep - see the GPU's landformsD)
+  let hiW = smooth(0.4, 0.85, hrPre)*0.8;
+  if (hiW > 0 && preAt){ const e = 0.002, gx = (preAt(qx + e, qy) - preAt(qx - e, qy))/(2*e), gy = (preAt(qx, qy + e) - preAt(qx, qy - e))/(2*e); hiW *= smooth(CRAG_STEEP[0], CRAG_STEEP[1], Math.hypot(gx, gy)*amp*SUK); }
+  const rw = Math.max(riser*0.35, hiW);   // (risers' crags at 0.35, as on the GPU)
   if (rw > 0.001){
     // warp the coordinates first (flowing, un-gridded gullies), then four ridged octaves: sharp crests, 1 - 1.5|n|
     const Lw = LF.cragWL, wz = qy/DWU, wx = qx + pnoise(qx/Lw + 3.7, pmod(qy, 256*Lw)/Lw + 8.1, TU/Lw, wz)*LF.cragW, wy = qy + pnoise(qx/Lw + 41.3, pmod(qy, 256*Lw)/Lw + 2.9, TU/Lw, wz)*LF.cragW;
@@ -708,7 +713,7 @@ function landforms(qx, qy, h, wl, det = 0, amp = 1, mesa = 0, guideAt = null, gu
   }
   return h;
 }
-function terrainH(qx, qy, wl = 0, amp = 1, dl = null, guideOnly = false){
+function terrainH(qx, qy, wl = 0, amp = 1, dl = null, guideOnly = false, preOnly = false){
   const d = [1.75*grid1(qx, qy)], dsoft = [];   // (dsoft: the same octaves with rounded crests, which the terraces follow)
   // dials (mirrors the shader): domain warp of the fold octaves, their gain about their mean, ridge (extra fine-octave gain)
   let wx = qx, wy = qy; const gW = dl ? dl[0] : 0, gG = dl ? dl[1] : 1, gR = dl ? dl[3] : 0;
@@ -725,7 +730,7 @@ function terrainH(qx, qy, wl = 0, amp = 1, dl = null, guideOnly = false){
   let hFull = (d[0] + d[1] + d[2] + d[3])/DREF;
   const hFullPre = hFull;
   const fM = Math.max(1, (2.2 + 0.2*amp)/Math.max(amp, 0.05));
-  if (hFull > wl) hFull = wl + (hFull - wl)*fM;
+  if (hFull > wl) hFull = wl + (hFull - wl)*(1 + (fM - 1)*smooth(0, 0.12, hFull - wl));   // (ramped in, as the GPU: a kink at the water line drew a crease)
   const hLow = wl + 0.05 + (d[0] + 0.6*d[1] + 0.6*d[2] + 0.25*d[3] - 6.0)/DREF;   // rolling hills: all four layers, softened
   const m = lowMask(qx, qy, amp);
   // the fine creases (the two smallest octaves) that the terraces must not follow
@@ -734,8 +739,10 @@ function terrainH(qx, qy, wl = 0, amp = 1, dl = null, guideOnly = false){
   const m5 = OCT_MEAN[5]*5*1.75, e1 = d[1] - m5;
   const detLow = (g0 + 0.6*e1 + 0.6*(d[2] - dsoft[1]) + 0.25*(d[3] - dsoft[2]))/DREF;
   const detFull = (g0 + e1 + (d[2] - dsoft[1]) + (d[3] - dsoft[2]))/DREF*(1 + (fM - 1)*smooth(0, 0.12, hFullPre - wl));   // (ramps in: a hard switch at the water line shifted every terrace by ~0.4 km)
+  if (preOnly) return hLow + (hFull - hLow)*m;
   if (guideOnly) return landforms(qx, qy, hLow + (hFull - hLow)*m, wl, detLow + (detFull - detLow)*m, amp, dl ? dl[2] : 0, null, true);
-  return landforms(qx, qy, hLow + (hFull - hLow)*m, wl, detLow + (detFull - detLow)*m, amp, dl ? dl[2] : 0, (x, y) => terrainH(x, y, wl, amp, dl, true)) + basinBias(qx, qy, wl);
+  return landforms(qx, qy, hLow + (hFull - hLow)*m, wl, detLow + (detFull - detLow)*m, amp, dl ? dl[2] : 0, (x, y) => terrainH(x, y, wl, amp, dl, true), false,
+    (x, y) => terrainH(x, y, wl, amp, dl, false, true)) + basinBias(qx, qy, wl);
 }
 // the biomes' water levels were written as fractions of the land under water: map them onto this height's
 // distribution (percentiles of the example's data, measured)
@@ -1700,10 +1707,11 @@ function makeLib(qy = null){
     });
     // crags (mirrors landforms() in JS): sharp V gullies between rounded buttresses, on the steep tier risers (zero on
     // the ledges and at the lip) and on high mountain ground
-    const xh = clamp(hrPre.sub(0.4).div(0.45), 0, 1).toVar(), high = sstep01(xh).mul(0.8);
+    const steep = smoothstep(CRAG_STEEP[0], CRAG_STEEP[1], length(hs0.yz).mul(amp).mul(SUK)).toVar();   // (see CRAG_STEEP; its own slope is left out of rwG)
+    const xh = clamp(hrPre.sub(0.4).div(0.45), 0, 1).toVar(), high = sstep01(xh).mul(0.8).mul(steep);
     // (terrace risers carry crags at 0.35: at full strength their gullies made a regular row of teeth along every ledge, which shading and the
     // slope-painted rock showed as jagged edges; high mountain ground keeps its full crags)
-    const rw = max(riser.mul(0.35), high).toVar(), rwG = select(riser.mul(0.35).greaterThanEqual(high), riserG.mul(0.35), hs0.yz.mul(xh.mul(6).mul(xh.oneMinus()).div(0.45).mul(0.8))).toVar();
+    const rw = max(riser.mul(0.35), high).toVar(), rwG = select(riser.mul(0.35).greaterThanEqual(high), riserG.mul(0.35), hs0.yz.mul(xh.mul(6).mul(xh.oneMinus()).div(0.45).mul(0.8)).mul(steep)).toVar();
     const lf0 = smoothstep(0.4, 0.2, lod).toVar();   // (all crags gone once the texel exceeds the largest crag cell, 0.4)
     rw.mulAssign(U_CRAG);
     If(rw.mul(lf0).greaterThan(0.001), () => {
@@ -1719,7 +1727,10 @@ function makeLib(qy = null){
         If(lf.greaterThan(0.001), () => {
           const cn = tPnoiseD(vec2(wq.x.div(L).add(17.3 + 9*k), ym(wq.y, 256*L).div(L).add(5.1)), TU/L, tw(q)).toVar();
           // (a ROUNDED crest: smooth |n| = sqrt(n^2 + k^2) - k. A true |n| is a knife-edge where the slope flips sign, which any sampling turned into jagged lines)
-          const sq = sqrt(cn.x.mul(cn.x).add(0.0036)).toVar(), rr = float(1).sub(sq.sub(0.06).mul(1.5)).toVar();
+          // (and PREFILTERED: the crest's rounding is at least 5 samples wide - kc in noise units of the octave: lod/L samples per unit. A 0.06
+          // crest is 3 m at the finest octave, 2-3 texels of the 1 m level: drawn as dashed hairlines. At level 0 kc stays 0.06, as in JS)
+          const kc = max(float(0.06), lod.mul(5/L)).toVar();
+          const sq = sqrt(cn.x.mul(cn.x).add(kc.mul(kc))).toVar(), rr = float(1).sub(sq.sub(kc).mul(1.5)).toVar();
           const rc = max(rr, 0), gr = select(rr.greaterThan(0), cn.yz.mul(cn.x.div(sq).mul(-1.5).div(L)), vec2(0)).toVar();
           // weight by the previous octave's ridge (mirrors JS); its gradient follows by the product rule
           const wgt = k ? pr.mul(1 - LF.cragD).add(LF.cragD) : float(1), dwg = k ? pg.mul(1 - LF.cragD) : vec2(0);
@@ -1751,17 +1762,17 @@ function makeLib(qy = null){
       J.assign(vec4(nA.y.mul(kJ).add(1), nA.z.mul(kJ), nB.y.mul(kJ), nB.z.mul(kJ).add(1)));
     });
     const tJ = g => vec2(g.x.mul(J.x).add(g.y.mul(J.z)), g.x.mul(J.y).add(g.y.mul(J.w)));   // gradient back to the unwarped coordinates
-    // the grid layer (q = 1): |corner offset| at the lattice points, eased between them (quintic, mirrors grid1() in JS), with its slope
+    // the finest layer (q = 1): a fold of GRADIENT noise, as the coarser octaves (mirrors grid1() in JS). It was the example's value noise
+    // (|corner offset| at the lattice points, quintic-eased between them), whose slope flattens along every lattice line: a square grid of
+    // straight lines along and across the Way, ~125 m apart, that the lighting drew as regular dashed strips on smooth ground. Scaled so its
+    // mean (OCT_MEAN[1]) is the old layer's: the land's average height is unchanged.
     const d1 = float(1.75*OCT_MEAN[1]).toVar(), g1 = vec2(0).toVar();
     { const L = EX_CELL, w = keep(L).toVar();
       If(w.greaterThan(0), () => {
-        const p = vec2(q0.x.div(L), ym(q0.y, 256*L).div(L)).toVar(), i = floor(p).toVar(), f = p.sub(i).toVar(), nx = TU/L;   // (the grid layer is not warped: the dials' warp bends the fold octaves only, as in JS)
-        const X0 = i.x.mod(nx).mod(256).toVar(), X1 = i.x.add(1).mod(nx).mod(256).toVar(), Y0 = i.y.mod(256).toVar(), Y1 = i.y.add(1).mod(256).toVar();
-        const [c00, c10, c01, c11] = corners4(X0, X1, Y0, Y1, tw(q0));
-        const b00 = abs(c00.z), b10 = abs(c10.z), b01 = abs(c01.z), b11 = abs(c11.z), u = quintic(f).toVar(), du = quinticD(f).toVar();
-        const a0 = mix(b00, b10, u.x).toVar(), a1 = mix(b01, b11, u.x).toVar();
-        d1.assign(mix(float(OCT_MEAN[1]), mix(a0, a1, u.y), w).mul(1.75));
-        g1.assign(vec2(mix(b10.sub(b00), b11.sub(b01), u.y).mul(du.x), a1.sub(a0).mul(du.y)).mul(w.mul(1.75/L)));
+        const n = tPnoiseD(vec2(q0.x.div(L).add(7.7), ym(q0.y, 256*L).div(L).add(3.3)), TU/L, tw(q0)).toVar();
+        const sa = sqrt(n.x.mul(n.x).add(GRID_K*GRID_K)).toVar();
+        d1.assign(mix(float(OCT_MEAN[1]), sa.sub(GRID_K).mul(GRID_S), w).mul(1.75));
+        g1.assign(n.yz.mul(w.mul(n.x.div(sa)).mul(GRID_S*1.75/L)));
       }); }
     const dq = [], gq = [], dsq = [], gsq = [];
     [5, 25, 125].forEach((Q, k) => {
@@ -1789,7 +1800,9 @@ function makeLib(qy = null){
     // the creases' scale ramps in above the water line (aboveF), with its slope
     const xa = clamp(hFull.sub(wl).div(0.12), 0, 1).toVar();
     const aboveF = float(1).add(fM.sub(1).mul(sstep01(xa))).toVar(), dAbove = gFull.mul(fM.sub(1).mul(xa.mul(6).mul(xa.oneMinus())).div(0.12)).toVar();
-    If(hFull.greaterThan(wl), () => { hFull.assign(hFull.sub(wl).mul(fM).add(wl)); gFull.mulAssign(fM); });
+    // (the mountain scale ramps in over the first 0.12 above the water line, as the creases' does (aboveF): switched on AT the line it was a kink -
+    // the slope jumped by fM along that contour, a hard crease line in every shading, sampled into dashes)
+    If(hFull.greaterThan(wl), () => { const d0 = hFull.sub(wl).toVar(); gFull.assign(gFull.mul(aboveF).add(dAbove.mul(d0))); hFull.assign(d0.mul(aboveF).add(wl)); });
     const hLow = wl.add(0.05).add(d1.add(dq[0].mul(0.6)).add(dq[1].mul(0.6)).add(dq[2].mul(0.25)).sub(6).div(DREF)).toVar();
     const gLow = g1.add(gq[0].mul(0.6)).add(gq[1].mul(0.6)).add(gq[2].mul(0.25)).div(DREF).toVar();
     const t = clamp(mn.x.add(clamp(amp.sub(1.5).div(2.5), -0.4, 0.6).mul(0.35)).add(0.25).div(0.3), 0, 1).toVar(), m = sstep01(t).toVar();
@@ -2226,6 +2239,7 @@ const SHL = [{half: 0.04, size: 1024, dyn: true}, {half: 0.25, size: 1024, dyn: 
   L.c = {x: NaN, y: NaN, z: NaN, valid: false, age: Math.floor(-i*30/3), thq: NaN};
   return L;
 });
+const SH_LEN = Math.min(6, 2*Math.sqrt(Math.max(1 - L_CA*L_CA, 0))/Math.max(L_CA, 0.15));   // a caster's shadow length per its reach (the sun's zenith angle)
 const SH = {o0: new THREE.Vector3(0, 0, 0), zN: new THREE.Vector3(0, 0, -1), on: uniformR(0), dbg: uniformR(0), frame: new THREE.Matrix4(), inv: new THREE.Matrix4(), ld: new THREE.Vector3(), thq: NaN,
   p: new THREE.Vector3(), g: new THREE.Vector3(), q: new THREE.Quaternion(), s1: new THREE.Vector3(1, 1, 1), B: new THREE.Matrix4(), tmp: new THREE.Matrix4()};
 // ndc -> (u, v, depth): v flipped (texture rows run top-down), depth as the backend stores it
@@ -2268,6 +2282,7 @@ function floraShadowMats(on){
   for (const o of SH_SWAP) o.mesh.material = on ? o.mS : o.m;
 }
 // each frame (on or near the ground): place, snap and render the levels that need it
+const _shDir = new THREE.Vector3();
 function updateShadows(w, groundPt){
   SH.on.value = compiling ? 0 : w;
   if (w <= 0 || compiling) return;
@@ -2295,9 +2310,11 @@ function updateShadows(w, groundPt){
     const mv = i === 0 ? 0 : (L.dyn ? 16 : 64)*L.texel, moved = Math.abs(x - L.c.x) > mv || Math.abs(y - L.c.y) > mv || z !== L.c.z;
     // (the 40 m level every frame; the 250 m level every other frame, enough for trees in the wind, at once when it
     // moves a texel or the light turns; the 1.6 km level after ~200 m, a turn or 120 frames)
-    const due = L.dyn ? (i === 0 || (SH.n & 3) === 0) : L.c.age >= 120;
+    // (and the cached 1.6 km level after a turn of ~30 degrees: it holds the casters that were kept for the view it was drawn for)
+    camera.getWorldDirection(_shDir); const turnedV = !L.dyn && (!L.c.dir || L.c.dir.dot(_shDir) < 0.87);
+    const due = L.dyn ? (i === 0 || (SH.n & 3) === 0) : (L.c.age >= 120 || turnedV);
     if (due || !L.c.valid || moved || turned){
-      Object.assign(L.c, {x, y, z, valid: true, age: 0});
+      Object.assign(L.c, {x, y, z, valid: true, age: 0}); (L.c.dir || (L.c.dir = new THREE.Vector3())).copy(_shDir);
       (L.c.abs || (L.c.abs = new THREE.Vector3())).set(x, y, z + L.half + SH_MARGIN).applyMatrix4(SH.frame);   // committed, absolute
       (L.c.frame || (L.c.frame = new THREE.Matrix4())).copy(SH.frame);
       placeShadowCam(L);
@@ -2472,7 +2489,12 @@ const U_LODB = uniform(0), U_REF = uniform(0), U_CRAG = uniform(1);
 // moves over the ground; level l is drawn out to U_CDR texels from the camera (Far detail), morphing onto level l+1 over the last quarter of that
 // range. Root nodes are level 12: 160 units square = the whole circumference around (TU) by 160 along the Way.
 const CDL = {P: 20, TOP: 14, MAXN: 4096};
-const U_CDR = uniform(80), U_CDH = uniform(0), U_QT = uniform(0);   // (U_CDH: the ground's height under the camera, km: the LOD distances are measured to the ground at that height)   // (U_CRAG: a debug scale on the crags, for isolating them; 1 in play)   // (U_REF: the terrain pixels' reference mode, see the terrain material)
+// U_CDMS: where each level's morph starts, as a share of its range. 0.75 (Strugar's default) let a node's morph reach its finer neighbour's edge
+// at these ranges: a node of level l can lie up to C/2 + 1.41 P of its spacings away (its parent split by its nearest corner, and its far corner
+// is a patch diagonal beyond), so the morph begins after that - (C + 2.83 P)/(2C) - or the coarser side's odd vertices slide while the finer
+// side's don't: a hairline step along every node edge, dashed at the vertex spacing (the 'strips' on smooth ground)
+const cdMorphStart = C => Math.max(0.75, (C + 2.83*CDL.P)/(2*C));
+const U_CDR = uniform(80), U_CDMS = uniform(cdMorphStart(80)), U_CDH = uniform(0), U_QT = uniform(0);   // (U_CDH: the ground's height under the camera, km: the LOD distances are measured to the ground at that height)   // (U_CRAG: a debug scale on the crags, for isolating them; 1 in play)   // (U_REF: the terrain pixels' reference mode, see the terrain material)
 const clipLevel = dNoise => clamp(log2(max(dNoise, 1e-6)).sub(Math.log2(CL.DV/2) + CL.L0).sub(U_LODB), 0, CL.NL - 1.001);
 // bilinear fetch of level kf (an integer-valued float node) at camera-relative qr: vec4(H, dH/dqx, dH/dqy, h)
 function clipFetch(kf, qr){
@@ -2862,7 +2884,7 @@ function makeTerrainMat(clip){
     // radius, a camera on a 1 km plateau saw every node >= 1 km away and drew the ground under it at level 3, 15 m between vertices)
     const rG = float(R).sub(U_CDH);
     const dK = length(vec3(cos(thA).mul(rG), sin(thA).mul(rG), zA).sub(cameraPosition)), rng = U_CDR.mul(sL).div(SUK);
-    const mk = select(lv.lessThan(CDL.TOP - 0.5), clamp(dK.sub(rng.mul(0.75)).div(rng.mul(0.25)), 0, 1), float(0)).toVar();
+    const mk = select(lv.lessThan(CDL.TOP - 0.5), clamp(dK.sub(rng.mul(U_CDMS)).div(rng.mul(U_CDMS.oneMinus())), 0, 1), float(0)).toVar();
     const qr = nI.xy.add(gI.sub(fract(gI.mul(0.5)).mul(2).mul(mk)).mul(sL)).toVar();   // camera-relative (precise; what the baked data is read with)
     const q = qr.add(CL.camU).toVar();
     const nodeW = lv.add(mk.mul(0.9)).toVar();   // (vN.w: the node's level + 0.9 x its morph, for the quadtree view)
@@ -3153,7 +3175,7 @@ const terrainNear = (() => { const g0 = terrain.geometry, g = new THREE.Instance
   g.setAttribute('position', g0.attributes.position); g.setAttribute('gridI', g0.attributes.gridI); g.setIndex(g0.index);
   const ni = new THREE.InstancedBufferAttribute(new Float32Array(CDL.MAXN*4), 4); ni.setUsage(THREE.DynamicDrawUsage); g.setAttribute('nodeI', ni);
   g.instanceCount = 0; return new THREE.Mesh(g, terrainMat); })();
-U_LODB.value = FAR_DETAIL[farDetail].bias; U_CDR.value = FAR_DETAIL[farDetail].C;
+U_LODB.value = FAR_DETAIL[farDetail].bias; U_CDR.value = FAR_DETAIL[farDetail].C; U_CDMS.value = cdMorphStart(U_CDR.value);
 // the quadtree selection, each frame: a node is split while it reaches into the next finer level's range (distance from the camera to the node's
 // nearest possible point, at the ground's radius); roots tile the Way within ZEXT. Origins go to the GPU relative to the camera (float32-exact).
 const _cdC = new THREE.Vector3(), _cdM = new THREE.Matrix4(), _cdF = new THREE.Frustum(), _cdP = new Float64Array(24);
@@ -5636,7 +5658,7 @@ function makeFloraLattice(cfg){
   const K = lists.length, visB = gpuCull ? instancedArray(n*K, 'uint') : null;
   const indirect = gpuCull ? new THREE.IndirectStorageBufferAttribute(new Uint32Array(5*K), 5) : null;
   const indS = gpuCull ? storage(indirect, 'uint', 5*K).toAtomic() : null;
-  const cu = {vp: uniform(new THREE.Matrix4()), cam: uniform(new THREE.Vector3()), ps: uniform(new THREE.Vector2(1, 1)), hpx: uniform(500)};
+  const cu = {vp: uniform(new THREE.Matrix4()), cam: uniform(new THREE.Vector3()), ps: uniform(new THREE.Vector2(1, 1)), hpx: uniform(500), ld: uniform(new THREE.Vector3(0, 0, 1))};   // ld: toward the light (shadow casters)
   const reset = gpuCull ? Fn(() => { for (let k=0;k<K;k++) atomicStore(indS.element(k*5 + 1), uint(0)); })().compute(1) : null;
   const cull = gpuCull ? Fn(() => {
     const {tCloud, cloudsAt, tAirHazeE} = makeLib();
@@ -5644,7 +5666,15 @@ function makeFloraLattice(cfg){
     const root = R4.xyz.add(vec3(0, 0, u.off)).toVar(), d = length(root.sub(cu.cam)).toVar();
     const rad = R4.w.mul(cfg.reach).toVar();   // the plant's reach (km)
     const c = cu.vp.mul(vec4(root.sub(normalize(vec3(root.xy, 0)).mul(rad.mul(0.5))), 1)).toVar();
-    const on = c.w.greaterThan(rad.negate()).and(abs(c.x).lessThan(c.w.add(cu.ps.x.mul(rad)))).and(abs(c.y).lessThan(c.w.add(cu.ps.y.mul(rad))));
+    const inView = cc => cc.w.greaterThan(rad.negate()).and(abs(cc.x).lessThan(cc.w.add(cu.ps.x.mul(rad)))).and(abs(cc.y).lessThan(cc.w.add(cu.ps.y.mul(rad))));
+    let on = inView(c);
+    // SHADOW CASTERS: the visible lists are what the shadow maps draw too, so a plant out of view whose shadow falls into view is kept - its
+    // shadow's far end (along the light, SH_LEN x its reach) or middle in view, within the shadow maps' reach (casters culled by their shadow
+    // volume, the standard way); in the main pass it is clipped, a few vertices each
+    if (!cfg.ring) {
+      const tip = root.sub(cu.ld.mul(rad.mul(SH_LEN))).toVar();
+      on = on.or(d.lessThan(1.7).and(inView(cu.vp.mul(vec4(tip, 1))).or(inView(cu.vp.mul(vec4(root.add(tip).mul(0.5), 1))))));
+    }
     // (and plants under ~0.7 px across are skipped: far rings looking down the tube hold thousands of sub-pixel trees)
     const px = rad.mul(cu.ps.y).mul(cu.hpx).div(max(c.w, 1e-4));
     If(R4.w.greaterThan(0).and(d.lessThan(cfg.tiers[cfg.tiers.length - 1])).and(d.greaterThan(cfg.minD || -1)).and(on).and(px.greaterThan(0.35)), () => {
@@ -5820,7 +5850,7 @@ function updateFlora(alt){
     const key = L.u.lo.value + ',' + L.u.cjLo.value + ',' + L.gen;
     if (key !== L.key && (L.gen !== L.pGen || ((flora.f + FLORA_LAT.indexOf(L)) & 1) === 0)){ hc(L.ring ? 'ring place' : 'flora place'); L.key = key; placeDispatch(L, L.N, !!L.reset); }
     if (L.reset){
-      L.cu.vp.value.copy(_vp); L.cu.cam.value.copy(_cp); L.cu.ps.value.set(camera.projectionMatrix.elements[0], camera.projectionMatrix.elements[5]); L.cu.hpx.value = renderer.domElement.height*0.5;
+      L.cu.vp.value.copy(_vp); L.cu.cam.value.copy(_cp); L.cu.ld.value.copy(SH.ld); L.cu.ps.value.set(camera.projectionMatrix.elements[0], camera.projectionMatrix.elements[5]); L.cu.hpx.value = renderer.domElement.height*0.5;
       renderer.compute(L.reset); renderer.compute(L.cull);
     }
   }
@@ -6379,7 +6409,7 @@ $('b-clouds').addEventListener('click', () => setClouds(!(U.uClouds.value > 0.5)
 // far detail: rebuild the terrain mesh at the new density, set the level bias, re-bake around you (vertex count shown for profiling)
 function setFarDetail(k){
   farDetail = k; const F = FAR_DETAIL[k];
-  U_CDR.value = F.C; U_LODB.value = F.bias; clipRebakeHere();
+  U_CDR.value = F.C; U_CDMS.value = cdMorphStart(F.C); U_LODB.value = F.bias; clipRebakeHere();
   try { localStorage.setItem('wayFar', String(k)); } catch (e) {}
   $('b-far').textContent = 'Far detail: ' + F.name;
 }
