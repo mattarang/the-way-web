@@ -1366,7 +1366,7 @@ perlinTex.magFilter = perlinTex.minFilter = THREE.NearestFilter; perlinTex.needs
 // shared by every material and set once per frame: one upload per render pass (renderGroup), not one per object
 const uniformR = v => uniform(v).setGroup(renderGroup);
 const U = {
-  uWayB: uniformR(0), uDbg: uniformR(0), uCellOff: uniformR(0), uCellLen: uniformR(CELL), uSU: uniformR(0), uWB: uniformR(0), uMoveU: uniformR(0), uBioMix: uniformR(1),
+  uWayB: uniformR(0), uDbg: uniformR(0), uCellOff: uniformR(0), uCellLen: uniformR(CELL), uSU: uniformR(0), uWayU: uniformR(0), uWB: uniformR(0), uMoveU: uniformR(0), uBioMix: uniformR(1),
   uGate0: uniformR(new THREE.Vector3()), uGate1: uniformR(new THREE.Vector3()),
   uFog: uniformR(new THREE.Vector3(WAYFOG.r, WAYFOG.g, WAYFOG.b)), uFogD: uniformR(0.00028),
   uTh: uniformR(-Math.PI/2), uZext: uniformR(ZEXT), uSs: uniformR(0),
@@ -1543,9 +1543,12 @@ function makeLib(qy = null){
   const tDials = q => {
     const d = vec4(0, 1, 0, 0).toVar();
     if (DIALS) {
-      const sw = U.uSs.sub(U.uSU.sub(yAbs(q.y)).div(SUK));
-      If(sw.greaterThanEqual(0), () => {
-        const u = sw.div(WAY.DS).sub(U.uWayB).div(WAY.W), t = fract(q.x.div(TU)).mul(WAY.K);
+      // (the point's place in the Way texture from uWayU, your own place in it computed exactly on the CPU: uSs is clamped to +-1e6 km for the
+      // caps' and gates' tests, and beyond a million km the dials were read from the wrong part of the texture - the ground there was built from
+      // another region's relief, mesas and terraces, 27-70 m off the CPU's own copy)
+      const dz = U.uSU.sub(yAbs(q.y)).div(SUK);
+      If(U.uSs.sub(dz).greaterThanEqual(0), () => {
+        const u = U.uWayU.sub(dz.div(WAY.DS)).div(WAY.W), t = fract(q.x.div(TU)).mul(WAY.K);
         d.assign(wayRead(u, t, 7, true));   // (exact: the dials shape the ground)
       });
     }
@@ -1836,7 +1839,7 @@ function makeLib(qy = null){
       If(f.greaterThan(0), () => { BIO_ROWS.forEach((k, r) => { B[k].assign(mix(B[k], bioRow(idx.add(1), r), f)); }); });
       B.s.assign(vec4(1, 1, 1, 0)); B.c.assign(vec4(0.5, 0.55, 0.12, 0));
     }).Else(() => {
-      const u = sw.div(WAY.DS).sub(U.uWayB).div(WAY.W), t = fract(th.div(TAU)).mul(WAY.K);
+      const u = U.uWayU.sub(z.div(WAY.DS)).div(WAY.W), t = fract(th.div(TAU)).mul(WAY.K);   // (uWayU: exact, see the dials' read; uSs is clamped to 1e6 km)
       [...BIO_ROWS, 's'].forEach((k, r) => { B[k].assign(wayRead(u, t, r, exact)); });
       B.c.assign(wayRead(u, t, 8, exact));
     });
@@ -2765,7 +2768,7 @@ function syncWorld(){
   U.uSU.value = pmod(shipS*SUK, SPER); U.uWB.value = Math.floor(shipS*SUK/SPER)*SPER/DWU;   // (the along-the-Way coordinate is wrapped for the GPU's precision; uWB carries the layers' absolute base)
   U.uTh.value = shipTh;
   U.uSs.value = Math.max(-1e6, Math.min(1e6, shipS));
-  const wb = WAY.base; updateBiomeTex(shipS); wayTexUpdate(shipS); U.uWayB.value = WAY.base;
+  const wb = WAY.base; updateBiomeTex(shipS); wayTexUpdate(shipS); U.uWayB.value = WAY.base; U.uWayU.value = shipS/WAY.DS - WAY.base;
   // the Way's biome window moved: the coarse levels, whose windows reach beyond it (and baked its clamped edge), are re-baked against the new data
   if (wb !== null && WAY.base !== wb) CL.stale = CL.STALE_FROM;
 }
