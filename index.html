@@ -247,9 +247,9 @@ button:disabled{opacity:.45}
   <button id="b-perf" class="perfbtn" type="button">Performance monitor: off</button>
   <button id="b-pos" class="perfbtn" type="button">Copy position (for bug reports)</button>
   <button id="b-exact" class="perfbtn" type="button">Exact near ground: off (experimental)</button>
-  <button id="b-rukm" class="perfbtn" type="button">Terrain scale: 24 km per Rune unit</button>
-  <button id="b-ruc" class="perfbtn" type="button">Terrain noise centre: +0.14</button>
-  <button id="b-ruv" class="perfbtn" type="button">Terrain variety: off (Rune's parameters everywhere)</button>
+  <button id="b-rukm" class="perfbtn" type="button">Terrain scale: 32 km per Rune unit</button>
+  <button id="b-ruc" class="perfbtn" type="button">Terrain noise centre: +0.08</button>
+  <button id="b-ruv" class="perfbtn" type="button">Terrain variety: on (relief scales his amplitude and strength)</button>
   <button id="b-hmap" class="perfbtn" type="button">Heightmap debug: off</button>
   <button id="b-hide" class="perfbtn" type="button">Hide (profiling): nothing</button>
   <button id="b-ter" class="perfbtn" type="button">Terrain: classic</button>
@@ -738,13 +738,13 @@ function uberH(qx, qy, wl = 0, amp = 1, dl = null, lod = 0){   // (Rune's terrai
 // (ruNoised, ruPhacelle, ruHeight and their GPU twins) is subject to the terms of the Mozilla Public License, v. 2.0. If a copy of the MPL was not
 // distributed with this file, You can obtain one at https://mozilla.org/MPL/2.0/.
 // Adapted only where the world needs it: (1) Rune's fract() hash -> our integer lattice hash (hashI), each lattice WRAPPED around the ring and the
-// Way (its cell count per axis rounded: <0.5% stretch), so the terrain is seamless and precise anywhere; (2) one Rune unit = RU.km km (24: his demo box becomes a ~24 km range of a few big mountains; the Debug
+// Way (its cell count per axis rounded: <0.5% stretch), so the terrain is seamless and precise anywhere; (2) one Rune unit = RU.km km (32 by default: his demo box becomes a ~32 km range of a few big mountains; the Debug
 // menu's terrain scale); (3) the world's variety drives only his height amplitude and erosion strength (relK: our mountain mask x regional relief;
 // at 0 strength his terrain is the gentle green panel of his comparison); (4) level of detail: an octave whose wavelength is under ~4-8 samples
 // fades to the filter's own fade target (its notion of the mean below that detail), so coarse levels hold what they can and agree with the fine.
-const RU = {km: 24, scale: 0.15, strength: 0.22, gully: 0.5, detail: 1.5, round: [0.1, 0.0, 0.1, 2.0], onset: [1.25, 1.25, 2.8, 1.5], aslope: [0.7, 1.0],
+const RU = {km: 32, scale: 0.15, strength: 0.22, gully: 0.5, detail: 1.5, round: [0.1, 0.0, 0.1, 2.0], onset: [1.25, 1.25, 2.8, 1.5], aslope: [0.7, 1.0],
   cell: 0.7, norm: 0.5, oct: 5, lac: 2.0, gain: 0.5, hoff: [-0.65, 0.0], hfreq: 3.0, hamp: 0.125, hoct: 3, hlac: 2.0, hgain: 0.1,
-  center: 0.14, relLow: 0.3, vary: false, fillEro: false};   // vary: the world's variety (relK) on; off = his exact parameters everywhere   // center: how far (Rune units, x the relief) his terrain's mid height sits above our water line (0)   // relLow: lowland relief vs mountain (x the regional relief); fillEro: the CPU fast fill runs the erosion too (lab)
+  center: 0.08, relLow: 0.3, vary: true, fillEro: false};   // vary: the world's variety (relK) on; off = his exact parameters everywhere   // center: how far (Rune units, x the relief) his terrain's mid height sits above our water line (0)   // relLow: lowland relief vs mountain (x the regional relief); fillEro: the CPU fast fill runs the erosion too (lab)
 const ruNU = () => RU.km*SUK;   // noise units per Rune unit
 // a lattice of f cells per Rune unit, wrapped: [frequency x, y (cells per Rune unit), cells around, cells along]
 const ruAxis = f => { const U = ruNU(), nx = Math.max(1, Math.round(TU/U*f)), ny = Math.max(1, Math.round(SPER/U*f)); return [nx/(TU/U), ny/(SPER/U), nx, ny]; };
@@ -3808,7 +3808,9 @@ const beamPix = uniformR(0.0015);   // radians per pixel, set each frame
 // at caps and terrain smoothly instead of relying on their meshes' own depth test
 // (ONE depth node shared by every glow and beam: each viewportDepthTexture() node copies the depth buffer on every render it is used in, and
 // on a tile-based GPU each copy ends and restarts the render pass - with one per material, up to five copies a frame)
-const SCENE_DEPTH = viewportDepthTexture();
+// (its own FLOAT depth texture: the view's depth is 32-bit float (REV_Z) and three's shared copy target defaults to 24-bit - Safari refused the
+// copy, 'Source and destination formats do not match')
+const SCENE_DEPTH = (() => { const dt = new THREE.DepthTexture(); dt.type = THREE.FloatType; return viewportDepthTexture(undefined, null, dt); })();
 const sceneDistance = () => {
   const depth = SCENE_DEPTH.x.toVar(), dv = normalize(positionView);
   return select(REV_Z ? depth.lessThanEqual(0.00001) : depth.greaterThanEqual(0.99999), float(1e9), perspectiveDepthToViewZ(depth, cameraNear, cameraFar).negate().div(max(dv.z.negate(), 1e-4)));
@@ -6876,7 +6878,7 @@ function setRuKm(km){
   $('b-rukm').textContent = 'Terrain scale: ' + km + ' km per Rune unit';
   for (const o of CL.forg) o.set(1e9, 1e9); clipRebakeHere();
 }
-{ let k = 24; try { k = +localStorage.getItem('wayRuKm') || 24; } catch (e) {} if (!RU_KMS.includes(k)) k = 24; RU.km = k; U_RUNU.value = k*SUK; $('b-rukm').textContent = 'Terrain scale: ' + k + ' km per Rune unit'; }
+{ let k = 32; try { k = +localStorage.getItem('wayRuKm') || 32; } catch (e) {} if (!RU_KMS.includes(k)) k = 32; RU.km = k; U_RUNU.value = k*SUK; $('b-rukm').textContent = 'Terrain scale: ' + k + ' km per Rune unit'; }
 $('b-rukm').addEventListener('click', () => setRuKm(RU_KMS[(RU_KMS.indexOf(RU.km) + 1) % RU_KMS.length]));
 window.__rukm = setRuKm;
 // THE NOISE CENTRE: how high his terrain's mid height sits above the water line (Rune units x the relief; 0.14 x 12 km ~ 1.7 km on mountains)
@@ -6886,7 +6888,7 @@ function setRuC(c){
   $('b-ruc').textContent = 'Terrain noise centre: +' + c.toFixed(2) + ' (~' + (c*RU.km).toFixed(1) + ' km on mountains)';
   for (const o of CL.forg) o.set(1e9, 1e9); clipRebakeHere();
 }
-{ let c = 0.14; try { const v = localStorage.getItem('wayRuC'); if (v !== null) c = +v; } catch (e) {} if (!RU_CS.includes(c)) c = 0.14; RU.center = c; U_RUC.value = c;
+{ let c = 0.08; try { const v = localStorage.getItem('wayRuC'); if (v !== null) c = +v; } catch (e) {} if (!RU_CS.includes(c)) c = 0.08; RU.center = c; U_RUC.value = c;
   $('b-ruc').textContent = 'Terrain noise centre: +' + c.toFixed(2) + ' (~' + (c*RU.km).toFixed(1) + ' km on mountains)'; }
 // TERRAIN VARIETY: off = his exact parameters everywhere (the clean test); on = our mountain mask x regional relief scale his height amplitude and
 // erosion strength continuously (relK, 0.1 .. 1.6)
@@ -6895,7 +6897,7 @@ function setRuV(on){
   $('b-ruv').textContent = 'Terrain variety: ' + (on ? 'on (relief scales his amplitude and strength)' : "off (Rune's parameters everywhere)");
   for (const o of CL.forg) o.set(1e9, 1e9); clipRebakeHere();
 }
-{ let on = false; try { on = localStorage.getItem('wayRuV') === '1'; } catch (e) {} RU.vary = on; U_RUV.value = on ? 1 : 0;
+{ let on = true; try { on = localStorage.getItem('wayRuV') !== '0'; } catch (e) {} RU.vary = on; U_RUV.value = on ? 1 : 0;
   $('b-ruv').textContent = 'Terrain variety: ' + (on ? 'on (relief scales his amplitude and strength)' : "off (Rune's parameters everywhere)"); }
 $('b-ruv').addEventListener('click', () => setRuV(!RU.vary));
 $('b-ruc').addEventListener('click', () => setRuC(RU_CS[(RU_CS.indexOf(RU.center) + 1) % RU_CS.length]));
