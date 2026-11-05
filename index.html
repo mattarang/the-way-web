@@ -639,9 +639,10 @@ function basinB(qx, qy){
 //   filtering    an octave fades to its mean (0) once its cell spans under 4 samples (lod), its crest rounding widens with lod: no aliasing
 //   plateau      mesa country remaps height into broad tiers (smooth stair: flat treads, rounded risers) - never fine contour strips
 // The GPU's uberH mirrors this; its slope is taken from the height itself (finite differences at the sample spacing: normals = heights).
-const UB = {L0: 16, N: 9, warpL: 8, k0: 0.06, m0: 0.2328, zN: 0.127, mtn0: 0.25, mtnA: 0.28, wet: 0.6, tierKm: 0.25,
-  sharpRamp: 2, sharp0: -0.45, sharpM: 1.1, sharpR: 0.6, ero0: 0.35, eroM: 1.4, gain: 0.5, warp0: 0.6, low0: 0.10, lowA: 0.14, altEro: 0.7,
-  expMu: 1.02};   // EXPONENTIALLY DISTRIBUTED gradients (Parberry 2015, JCGT 4(2): real terrain's gradients are exponentially distributed at every scale;
+// (tuned in the terrain lab, scratchpad lab/: ridged dramatic ranges, strongly warped coasts and ranges, regions of differing relief)
+const UB = {L0: 16, N: 9, warpL: 16, k0: 0.045, m0: 0.2328, zN: 0.127, mtn0: 0.3, mtnA: 0.6, wet: 0.6, tierKm: 0.25,
+  sharpRamp: 2, sharp0: -0.05, sharpM: 1.25, sharpR: 0.6, ero0: 0.35, eroM: 0.8, gain: 0.55, warp0: 4, low0: 0.10, lowA: 0.25, altEro: 0.4,
+  expMu: 1.015, warp2: 0.4, rel0: 0.55, relA: 1.0};   // EXPONENTIALLY DISTRIBUTED gradients (Parberry 2015, JCGT 4(2): real terrain's gradients are exponentially distributed at every scale;
                   // cited by Sean Murray as shaping No Man's Sky's generator): each lattice point's gradient scaled by mu^-k, k a hash 0..255 (his
                   // magnitude table, mu = 1.02 as in his code), normalized to unit RMS - mostly gentle ground, now and then a steep feature
 UB.expN = 1/Math.sqrt((1 - Math.pow(UB.expMu, -512))/(256*(1 - Math.pow(UB.expMu, -2))));   // (1 / RMS of mu^-k over k = 0..255)
@@ -664,8 +665,9 @@ function pnoiseD(x, y, nx, w, mag = false){   // Perlin with its slope in lattic
 function uberN(qx, qy, lod, sharp, ero, gainK, warpA){
   const w = qy/DWU;
   let x = qx, y = qy;
-  if (warpA > 0){ const L = UB.warpL;
-    x += warpA*pnoise(qx/L + 3.3, pmod(qy, 256*L)/L + 1.1, TU/L, w); y += warpA*pnoise(qx/L + 17.9, pmod(qy, 256*L)/L + 9.4, TU/L, w); }
+  if (warpA > 0){   // two-scale domain warp (the broad one bends ranges and coasts, the finer one their outlines)
+    for (const [L, A] of [[UB.warpL, warpA], [UB.warpL/4, warpA*UB.warp2]]){
+      x += A*pnoise(qx/L + 3.3, pmod(qy, 256*L)/L + 1.1, TU/L, w); y += A*pnoise(qx/L + 17.9, pmod(qy, 256*L)/L + 9.4, TU/L, w); } }
   let sum = 0, a = 1, norm = 0, dsx = 0, dsy = 0;
   for (let i = 0; i < UB.N; i++){
     const L = UB.L0/Math.pow(2, i), wt = lod > 0 ? Math.max(0, Math.min(1, L/(2*lod) - 1)) : 1;
@@ -685,19 +687,20 @@ function uberN(qx, qy, lod, sharp, ero, gainK, warpA){
 }
 // the macro fields at q: [mountain mask m, sharpness, erosion, gain, warp, mesa] (mirrors the GPU's uberMacro)
 function uberMacro(qx, qy, amp, dl){
-  const m = lowMask(qx, qy, amp), [rA] = lfRegions(qx, qy);
+  const m = lowMask(qx, qy, amp), [rA, rB] = lfRegions(qx, qy);
   const ridge = dl ? dl[3] : 0, gain = dl ? dl[1] : 1, warp = dl ? dl[0] : 0, mesa = dl ? dl[2] : 0;
   const sharp = Math.max(-1, Math.min(1, UB.sharp0 + UB.sharpM*m + 0.9*ridge + UB.sharpR*rA));
-  return [m, sharp, UB.ero0 + UB.eroM*m, UB.gain*Math.sqrt(Math.max(0.5, Math.min(1.4, gain))), UB.warp0 + 2*warp, mesa];
+  const rel = UB.rel0 + UB.relA*smooth(-0.35, 0.35, rB);   // RELIEF: whole regions more or less dramatic (~30 km field)
+  return [m, sharp, UB.ero0 + UB.eroM*m, UB.gain*Math.sqrt(Math.max(0.5, Math.min(1.4, gain))), UB.warp0 + 2*warp, mesa, rel];
 }
 // The noise value U -> normalized height h: ONE continuous field of height above the water line, d = base + relief x z (z: U in standard
 // deviations), both growing smoothly with the mountain mask m - lowland (base 0.10, relief 0.06: rolling hills, the odd pond) to mountain (base
 // 0.25, relief 0.28: ranges, lakes in the valley floors). Wetter biomes (a higher water line wl) sit lower, so more of them is water. No second
 // datum to switch to (a lowland near the water line next to absolute mountains drew cliffs where the mask turned). Mountains reach ~2.2 km
 // (fM, eased in above the water); mesa country remaps into broad tiers.
-function uberShape(U, wl, amp, m, mesa){
+function uberShape(U, wl, amp, m, mesa, rel = 1){
   const z = U/UB.zN, mm = m*m*(3 - 2*m);
-  let d = UB.low0 + (UB.mtn0 - UB.low0)*mm + (UB.lowA + (UB.mtnA - UB.lowA)*mm)*z - UB.wet*(wl - 0.25);
+  let d = UB.low0 + (UB.mtn0 - UB.low0)*mm + (UB.lowA + (UB.mtnA - UB.lowA)*mm)*rel*z - UB.wet*(wl - 0.25);
   if (d > 0){ const fM = Math.max(1, (2.2 + 0.2*amp)/Math.max(amp, 0.05)); d *= 1 + (fM - 1)*smooth(0, 0.12, d)*mm; }
   let h = wl + d;
   if (mesa > 0 && d > 0){ const NT = Math.max(4, amp/UB.tierKm), x = d*NT, f = Math.floor(x), u = x - f, p = 3, st = Math.pow(u, p)/(Math.pow(u, p) + Math.pow(1 - u, p));
@@ -705,8 +708,8 @@ function uberShape(U, wl, amp, m, mesa){
   return h;
 }
 function uberH(qx, qy, wl = 0, amp = 1, dl = null, lod = 0){
-  const [m, sharp, ero, gainK, warpA, mesa] = uberMacro(qx, qy, amp, dl);
-  return uberShape(uberN(qx, qy, lod, sharp, ero, gainK, warpA), wl, amp, m, mesa);   // (no basin layer: its +-0.4 regional steps drew walls round lakes and flat plateaus)
+  const [m, sharp, ero, gainK, warpA, mesa, rel] = uberMacro(qx, qy, amp, dl);
+  return uberShape(uberN(qx, qy, lod, sharp, ero, gainK, warpA), wl, amp, m, mesa, rel);   // (no basin layer: its +-0.4 regional steps drew walls round lakes and flat plateaus)
 }
 function basinBias(qx, qy, wl){
   if (wl <= 0.002) return 0;
@@ -850,7 +853,7 @@ const ARCH_DIAL = {'Seventh chamber parkland':[0,1,0,0], 'Grassland':[.1,.85,0,0
   'Mesa country':[.3,1.2,1,.3], 'Blue glacier':[.4,1.1,0,.6], 'Obsidian shards':[.7,1.4,.3,.9]};
 const DIALS = !/[?&]dials=0/.test(location.search);
 // ?terrain=uber: the terrain from one continuously-varying fractal (uberH, below) instead of the example's octaves + landform layers
-const UBER = /[?&]terrain=uber\b/.test(location.search) || (() => { try { return localStorage.getItem('wayTerrain') === 'uber'; } catch (e) { return false; } })();
+const UBER = !/[?&]terrain=classic\b/.test(location.search) && (() => { try { return localStorage.getItem('wayTerrain') !== 'classic'; } catch (e) { return true; } })();   // (the new terrain is the default; ?terrain=classic or Debug for the old)
 let DEBUG_VIEWS = /[?&]dbg\b/.test(location.search);   // (also switched on at run time by the debug button: enableDebugViews rebuilds the materials with them)
 //   // the terrain's debug views are compiled into its shader only with ?dbg (they cost registers on every pixel)
 const ARCH_POS = {'Seventh chamber parkland':[.55,.55,.12,0], 'Grassland':[.5,.5,.2,.02], 'Old forest':[.42,.82,.4,.05], 'Dune sea':[.95,.04,.25,.08],
@@ -1913,9 +1916,10 @@ function makeLib(qy = null){
   // this; everything else uses it only to stand in where no baked level covers a point
   // ---- UBER TERRAIN (?terrain=uber; mirrors uberN / uberMacro / uberShape in JS: see there) ----
   const tUberN = fnL('uberN', 'float', ['q:vec2', 'lod:float', 'sharp:float', 'ero:float', 'gainK:float', 'warpA:float'], ([q, lod, sharp, ero, gainK, warpA]) => {
-    const w = tw(q), Lw = UB.warpL;
-    const x = q.x.add(warpA.mul(tPnoiseD(vec2(q.x.div(Lw).add(3.3), ym(q.y, 256*Lw).div(Lw).add(1.1)), TU/Lw, w).x)).toVar();
-    const y = q.y.add(warpA.mul(tPnoiseD(vec2(q.x.div(Lw).add(17.9), ym(q.y, 256*Lw).div(Lw).add(9.4)), TU/Lw, w).x)).toVar();
+    const w = tw(q), x = q.x.toVar(), y = q.y.toVar();
+    for (const [Lw, k] of [[UB.warpL, 1], [UB.warpL/4, UB.warp2]]){   // (two-scale warp, mirrors JS: both offsets from the unwarped q)
+      x.addAssign(warpA.mul(k).mul(tPnoiseD(vec2(q.x.div(Lw).add(3.3), ym(q.y, 256*Lw).div(Lw).add(1.1)), TU/Lw, w).x));
+      y.addAssign(warpA.mul(k).mul(tPnoiseD(vec2(q.x.div(Lw).add(17.9), ym(q.y, 256*Lw).div(Lw).add(9.4)), TU/Lw, w).x)); }
     const sum = float(0).toVar(), a = float(1).toVar(), norm = float(0).toVar(), ds = vec2(0).toVar(), ab = abs(sharp).toVar();
     for (let i = 0; i < UB.N; i++){
       const L = UB.L0/Math.pow(2, i), wt = clamp(float(L).div(max(lod, 1e-6).mul(2)).sub(1), 0, 1).toVar();
@@ -1937,9 +1941,9 @@ function makeLib(qy = null){
     }
     return sum.div(norm);
   });
-  const tUberShape = (U, wl, amp, m, mesa) => {
+  const tUberShape = (U, wl, amp, m, mesa, rel) => {
     const z = U.div(UB.zN), mm = m.mul(m).mul(m.mul(-2).add(3)).toVar();
-    const d = float(UB.low0).add(mm.mul(UB.mtn0 - UB.low0)).add(mm.mul(UB.mtnA - UB.lowA).add(UB.lowA).mul(z)).sub(wl.sub(0.25).mul(UB.wet)).toVar();
+    const d = float(UB.low0).add(mm.mul(UB.mtn0 - UB.low0)).add(mm.mul(UB.mtnA - UB.lowA).add(UB.lowA).mul(rel).mul(z)).sub(wl.sub(0.25).mul(UB.wet)).toVar();
     If(d.greaterThan(0), () => { const fM = max(float(1), amp.mul(0.2).add(2.2).div(max(amp, 0.05))); d.mulAssign(fM.sub(1).mul(smoothstep(0, 0.12, d)).mul(mm).add(1)); });
     const h = wl.add(d).toVar();
     If(mesa.greaterThan(0).and(d.greaterThan(0)), () => {
@@ -1954,8 +1958,9 @@ function makeLib(qy = null){
     const dl = rg.dl || vec4(0, 1, 0, 0);
     const sharp = clamp(m.mul(UB.sharpM).add(UB.sharp0).add(dl.w.mul(0.9)).add(rg.rA.x.mul(UB.sharpR)), -1, 1).toVar();
     const ero = m.mul(UB.eroM).add(UB.ero0).toVar(), gainK = sqrt(clamp(dl.y, 0.5, 1.4)).mul(UB.gain).toVar(), warpA = dl.x.mul(2).add(UB.warp0).toVar();
+    const rt = clamp(rg.rB.x.add(0.35).div(0.7), 0, 1), rel = rt.mul(rt).mul(rt.mul(-2).add(3)).mul(UB.relA).add(UB.rel0).toVar();   // (relief field, as JS)
     const e = max(lod.mul(0.5), 2e-4).toVar();
-    const H = lq => tUberShape(tUberN(lq, lod, sharp, ero, gainK, warpA), wl, amp, m, dl.z);
+    const H = lq => tUberShape(tUberN(lq, lod, sharp, ero, gainK, warpA), wl, amp, m, dl.z, rel);
     const h0 = H(q).toVar(), hx = H(q.add(vec2(e, 0))), hy = H(q.add(vec2(0, e)));
     return vec3(h0, hx.sub(h0).div(e), hy.sub(h0).div(e));
   };
