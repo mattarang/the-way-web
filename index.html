@@ -744,7 +744,7 @@ function uberH(qx, qy, wl = 0, amp = 1, dl = null, lod = 0){   // (Rune's terrai
 // fades to the filter's own fade target (its notion of the mean below that detail), so coarse levels hold what they can and agree with the fine.
 const RU = {km: 32, scale: 0.15, strength: 0.22, gully: 0.5, detail: 1.5, round: [0.1, 0.0, 0.1, 2.0], onset: [1.25, 1.25, 2.8, 1.5], aslope: [0.7, 1.0],
   cell: 0.7, norm: 0.5, oct: 5, lac: 2.0, gain: 0.5, hoff: [-0.65, 0.0], hfreq: 3.0, hamp: 0.125, hoct: 3, hlac: 2.0, hgain: 0.1,
-  center: 0.08, relLow: 0.3, vary: true, fillEro: false};   // vary: the world's variety (relK) on; off = his exact parameters everywhere   // center: how far (Rune units, x the relief) his terrain's mid height sits above our water line (0)   // relLow: lowland relief vs mountain (x the regional relief); fillEro: the CPU fast fill runs the erosion too (lab)
+  center: 0.08, relLow: 0.3, vary: true, fillEro: false, rrK: 13.2};   // rrK: the sharpness floor (ruHeight): crests at least ~3 samples round   // vary: the world's variety (relK) on; off = his exact parameters everywhere   // center: how far (Rune units, x the relief) his terrain's mid height sits above our water line (0)   // relLow: lowland relief vs mountain (x the regional relief); fillEro: the CPU fast fill runs the erosion too (lab)
 const ruNU = () => RU.km*SUK;   // noise units per Rune unit
 // a lattice of f cells per Rune unit, wrapped: [frequency x, y (cells per Rune unit), cells around, cells along]
 const ruAxis = f => { const U = ruNU(), nx = Math.max(1, Math.round(TU/U*f)), ny = Math.max(1, Math.round(SPER/U*f)); return [nx/(TU/U), ny/(SPER/U), nx, ny]; };
@@ -796,7 +796,11 @@ function ruHeight(qx, qy, lod, P, ero = true){
   const fade0 = Math.max(-1, Math.min(1, n0/(A*0.6)));
   n0 = n0*0.5 + 0.5; n1 *= 0.5; n2 *= 0.5;
   // ErosionFilter(...)
-  const GW = P.gw, rnd = [P.rr, RU.round[1], RU.round[2], RU.round[3]];
+  // SHARPNESS FLOOR (prefiltering): a crest is drawn with this level's samples, so it may be no narrower than ~3 of them. His rounding sets a crest
+  // radius of ~rounding x cell / (2 pi x cell scale) (constant over the octaves, his w = lacunarity): rounding >= RU.rrK x lod / cell. Near you
+  // (fine samples) his own value rules; farther out the crests are only as sharp as the level can draw (no jaggies, at any setting)
+  const rrFloor = lod > 0 ? RU.rrK*lod/(RU.scale*RU.cell*U) : 0;
+  const GW = P.gw, rnd = [Math.max(P.rr, rrFloor), RU.round[1], RU.round[2], RU.round[3]];
   let strength = RU.strength*Math.min(relK*P.sK, RUV.sMax)*RU.scale, fadeTarget = fade0, freq = 1/(RU.scale*RU.cell), rmult = 1, magnitude = 0;
   const sl = Math.max(Math.hypot(n1, n2), 1e-10), on = RU.onset;
   const rIn = (rnd[1] + (rnd[0] - rnd[1])*Math.max(0, Math.min(1, fadeTarget + 0.5)))*rnd[2];
@@ -2149,7 +2153,8 @@ function makeLib(qy = null){
   // Heightmap() + ErosionFilter() at q (noise units; q.y absolute, wrapped at SPER), lod = sample spacing, relK = the world's relief factor.
   // Returns vec4(eroded height (Rune units), slope x, slope y, packed: round(ridge map 0..1 x 255) + erosion offset 0..1 x 0.998)
   const mkRuHeight = ero => fnL(ero ? 'ruHeight' : 'ruHeightBase', 'vec4', ['q:vec2', 'lod:float', 'pa:vec4', 'pb:vec4'], ([q, lod, pa, pb]) => {
-    const relK = pa.x, sK = pa.y, GW = pa.z, DET = pa.w, RR = pb.x, wb = pb.y, wt = pb.z;   // (ruParams)
+    const relK = pa.x, sK = pa.y, GW = pa.z, DET = pa.w, wb = pb.y, wt = pb.z;   // (ruParams)
+    const RR = max(pb.x, max(lod, 0).mul(RU.rrK/(RU.scale*RU.cell)).div(U_RUNU));   // (the sharpness floor: see ruHeight)
     const Un = U_RUNU, p = q.div(Un).toVar(), span = vec2(float(TU), float(SPER)).div(Un).toVar();
     const axis = f => { const per = max(floor(span.mul(f).add(0.5)), 1).toVar(); return {per, fr: per.div(span).toVar()}; };
     const lodC = max(lod, 1e-7), vis = lam => smoothstep(lodC.mul(4), lodC.mul(8), lam.mul(Un));
@@ -2206,6 +2211,19 @@ function makeLib(qy = null){
   // (the full filter for the bake; the base alone - every octave at its fade target - for the render shaders' rare no-data fallback: the erosion's
   // nested Phacelle loops kept out of the terrain's vertex shader, which Safari's WebGPU failed to draw with them)
   const tRuHeight = mkRuHeight(true), tRuHeightBase = mkRuHeight(false);
+  // his Buffer B (after Fewes): 8 octaves of the derivative noise from 2 per unit, frequency x2 and amplitude x0.95 each, from 0.5 - the detail
+  // texture whose x channel is the materials' 'breakup'. q: the bake's coordinates (y the window offset), lod: the texel; octaves under ~4-8
+  // samples fade to their mean
+  const ruBreakup = (q, lod) => {
+    const Un = U_RUNU, qe = vec2(q.x, ym(q.y, SPER)), p = qe.div(Un).toVar(), span = vec2(float(TU), float(SPER)).div(Un).toVar(), lodC = max(lod, 1e-7);
+    const c = float(0).toVar(); let a = 0.5, f = 2;
+    for (let i = 0; i < 8; i++){
+      const per = max(floor(span.mul(f).add(0.5)), 1).toVar(), fr = per.div(span), v = smoothstep(lodC.mul(4), lodC.mul(8), Un.div(f)).toVar(), aa = a;
+      If(v.greaterThan(0), () => { c.addAssign(tRuNoised(p.mul(fr), per).x.mul(aa).mul(v)); });
+      a *= 0.95; f *= 2;
+    }
+    return c;
+  };
   // the eroded terrain at q: Rune's height over our macro elevation (ruToH); the heights-only bake carries his ridge map and erosion offset in
   // y and z (the ridge pass stores them); elsewhere y, z are the slope (normalized h per noise unit, from his analytic slope)
   const uberAt = (q, lod, wl, amp, rg, hOnly = false, ero = true) => {
@@ -2322,7 +2340,7 @@ function makeLib(qy = null){
   // h: the function's own height (palette, emission); H: the baked height in km above sea level, as drawn (the water line, elevations, bed depth);
   // lod: the pixel's footprint in noise units (fades detail finer than a pixel); slope: 1 - cos of the slope angle; px: called from a pixel shader
   // (screen-space derivatives exist there; placement's compute shaders call it too, and must match the painted colour where it matters).
-  function surface(B, h, H, q, lod, slope, sector, seabed, px = false, cov = null, qPrec = null, topo = null, ridge = null){   // ridge: the erosion's ridge map here (groundRidge)
+  function surface(B, h, H, q, lod, slope, sector, seabed, px = false, cov = null, qPrec = null, topo = null, rv = null){   // rv: Rune's baked masks here (groundRuneV: breakup, ridge map, erosion offset, tree factor; 0..1)
     // topo: groundTopo's wetness (0.5 if not given)   // qPrec: q mod 32 computed precisely (camera-relative + camM), terrain pixels only   // cov: the baked rock coverage (-1: none), terrain pixels only
     const amp = B.a.w.mul(5).toVar(), wl = B.e.w;
     // fine noise coordinates: q mod 32 (32 divides TU and SPER), precise where the caller has them (q itself is float32: ~1 m steps far along)
@@ -2408,55 +2426,88 @@ function makeLib(qy = null){
       col.assign(mix(col.mul(vec3(0.93, 1.0, 1.05)), col.mul(vec3(1.06, 1.0, 0.86)), kh));
       col.assign(mix(col.mul(vec3(0.88, 0.91, 0.97)), col.mul(vec3(1.07, 1.05, 0.96)), kv.add(0.5)));
     }
-    // Material boundaries, BotW-style: the blend weight is a wide, smooth slope ramp, wobbled by a detail noise (the 'height map' of vertex
-    // blending) and then sharpened into a narrow edge, so grass meets earth and rock along a tight, slightly irregular line instead of a long soft
-    // fade. The bands are SLOPE's (the grass and plants follow the same ones). The wobble fades with its noise's own frequency (at distance it only
-    // crawled), and the edge widens to at least the slope's change across a pixel (no sparkle).
-    const ew = (px ? max(float(0.12), fwidth(sj).mul(2)) : float(0.12)).toVar();
-    const dW = float(0).toVar();
-    // SOIL ON THE LANDFORM (the eroded terrain): soil-mantled hollows hold colluvium on steeper ground, convex spurs and crests shed it to bare
-    // rock (Dietrich & Dunne 1978; Heimsath et al. 1997: soil thickens with convergence, thins with convexity). The wetness (groundTopo: the
-    // erosion's ridge map and the ground's relief) moves every slope limit - earth, rock, the plants' - by up to +-0.25 in sin (~+-15 deg)
-    const sSh = (UBER ? soilShift(topo ?? float(0.5), ridge ?? float(0)) : float(0)).toVar();
-    If(sj.greaterThan(sSh.add(SLOPE.dirt - SLOPE.w)), () => {
-      const nbA = vnP(16, 11).sub(0.5).mul(keepF(16));
-      dW.assign(smoothstep(0.43, 0.57, sj.sub(sSh).sub(SLOPE.dirt).div(ew).add(0.5).add(nbA.mul(0.5))));
-      // (in patches ~40 m across, so a cliff's foot is not ringed by an even earth stroke: review round 1, 'sticker outline')
-      dW.mulAssign(smoothstep(0.35, 0.6, vnP(24, 77)));
-    });
-    // scree: loose angular rock on the steep ground under the cliffs where it is dry, cold or high; bare earth stays in the wet lowlands
-    const {screeK, wScr} = cm;
-    If(wScr.greaterThan(0.002), () => {
-      const sa = tVnoise(q.mul(9).add(97), vec2(TU*9, SPER*9)), sb = vnP(55, 13).sub(0.5).mul(smoothstep(0.03/55, 0.01/55, lod));
-      const scree = mix(vec3(0.55, 0.52, 0.47), vec3(0.68, 0.64, 0.58), smoothstep(0.3, 0.7, sa)).mul(sb.mul(0.8).add(1));
-      col.assign(mix(col, mix(scree, bTint.mul(0.6).add(0.3), 0.15), wScr.mul(0.9)));
-    });
-    col.assign(mix(col, DIRT, dW.mul(0.9).mul(screeK.mul(-0.7).add(1))));
-    // BotW-style rock: smooth form, painted colour (large cool/warm patches); the relief is the bump normal in the lighting. Rock sits on the crests
-    // and walls, grass and earth in the hollows: the same warped ridge field the terrain's crags are built from (octave 2) raises the slope rock
-    // needs in hollows (rkS, up to +0.1 in sin). It never adds rock below SLOPE.rock, so the plant rules stay valid. (Nothing below can make rock
-    // where sin < SLOPE.rock - 0.05: the work is skipped there.)
     const rkM = float(0).toVar(), rockC = vec3(0).toVar();
-    const hasCov = cov ? cov.greaterThanEqual(0) : null;
-    If(cov ? sj.sub(sSh).greaterThan(SLOPE.rock - 0.05).or(cov.greaterThan(0.25)) : sj.sub(sSh).greaterThan(SLOPE.rock - 0.05), () => {
-      const nbB = vnP(23, 31).sub(0.5).mul(keepF(23));
-      if (UBER){   // (the eroded terrain: the soil shift above, no crag field)
-        rkM.assign(smoothstep(0.43, 0.57, sj.sub(sSh).sub(SLOPE.rock).div(ew).add(0.5).add(nbB.mul(0.35))));
-        if (cov) If(hasCov, () => { rkM.assign(smoothstep(0.43, 0.57, cov.add(nbB.mul(0.18)).sub(sSh.mul(4)))); });
-      } else {
-      const Lw = LF.cragWL, W = LF.cragW, Lk = LF.cragL[1];
-      const wa = tPnoiseD(vec2(q.x.div(Lw).add(3.7), q.y.mod(256*Lw).div(Lw).add(8.1)), TU/Lw, tw(q)).x, wb = tPnoiseD(vec2(q.x.div(Lw).add(41.3), q.y.mod(256*Lw).div(Lw).add(2.9)), TU/Lw, tw(q)).x;
-      const wq = q.add(vec2(wa, wb).mul(W));
-      const cn = tPnoiseD(vec2(wq.x.div(Lk).add(26.3), wq.y.mod(256*Lk).div(Lk).add(5.1)), TU/Lk, tw(q)).x;
-      const rkS = clamp(float(1).sub(abs(cn).mul(1.5)), 0, 1).oneMinus().mul(0.1);
-      rkM.assign(smoothstep(0.43, 0.57, sj.sub(rkS).sub(SLOPE.rock).div(ew).add(0.5).add(nbB.mul(0.35))));
-      // with baked coverage: a crisp edge at 50% of the texel's area being rock, keeping the same wobble and crest bias (scaled into coverage)
-      if (cov) If(hasCov, () => { rkM.assign(smoothstep(0.43, 0.57, cov.add(nbB.mul(0.18)).sub(rkS.mul(4)))); });
-      }
-      const n1 = tVnoise(q.mul(3).add(5), vec2(TU*3, SPER*3));
-      rockC.assign(mix(vec3(0.80, 0.80, 0.79), vec3(0.88, 0.83, 0.74), smoothstep(0.25, 0.75, n1)).mul(B.s.rgb));   // cool blue-grey to warm cream, in the biome's stone tint
-    });
-    col.assign(mix(col, rockC, rkM));
+    if (UBER){
+    // RUNE'S MATERIALS (his Image buffer's diffuse composition, after Fewes; in our BotW palette, lighting and climate surfaces): the ground starts as
+    // rock, darker low down; dirt where the erosion cut down (his 'occlusion', the erosion offset), broken up by his detail noise; our ground (the
+    // biome's grass and the climate's surfaces: 'col' so far) below his grass line on gentle ground or under trees; his tree mask as canopy; white
+    // drainage lines along the ridge map's creases; the breakup over all. Heights in his units: hisY = height above our water line / km per unit
+    // + his mid height less the noise centre (relief 1); his grass line 0.465 and snow from our climate's snowline.
+    const rvv = rv ?? vec4(0.5, 0.5, 0.5, 0);
+    const br = rvv.x.mul(2).sub(1).toVar(), ridgeM = rvv.y.toVar(), occl = clamp(rvv.z.mul(2).sub(0.5), 0, 1).toVar(), tf = rvv.w;
+    const kmU = U_RUNU.div(SUK), hisY = elev.div(kmU).add(0.5).sub(U_RUC).toVar();
+    const glY = min(float(0.465), Tc.mul(4).add(0.8).sub(0.8).div(kmU).add(0.5).sub(U_RUC)).toVar();   // (his grass line, lower in cold climates)
+    const n1 = tVnoise(q.mul(3).add(5), vec2(TU*3, SPER*3));
+    rockC.assign(mix(vec3(0.50, 0.48, 0.47), vec3(0.60, 0.56, 0.51), smoothstep(0.25, 0.75, n1)).mul(B.s.rgb));   // (his dark cliff, in BotW's painted greys)
+    const base = rockC.mul(mix(float(0.6), float(1), smoothstep(0.4, 0.52, hisY))).toVar();
+    const dirtW = smoothstep(0.6, 0.0, occl.add(br.mul(1.5))).toVar();
+    base.assign(mix(base, DIRT, dirtW));
+    // trees (his GetTreesAmount: the baked factor x his height term, then his clump noise)
+    const tAmt = smoothstep(glY.add(0.05), glY.add(0.01), hisY.add(0.01).add(occl.sub(0.8).mul(0.05))).mul(tf).sub(0.5).div(0.6);
+    const tNz = vnP(6, 41).mul(2).sub(1);   // (his clump noise at 200 per unit: ~160 m clumps at 32 km per unit)
+    const treeMask = clamp(float(1).sub(tNz.mul(0.5).add(0.5).pow(2)).sub(1).add(tAmt).mul(1.5).mul(0.5).add(0.5), 0, 1).toVar();
+    const normalY = slope.oneMinus();
+    const wg = smoothstep(glY.add(0.05), glY.add(0.02), hisY.add(0.01).add(occl.sub(0.8).mul(0.05)).sub(br.mul(0.02)))
+      .mul(smoothstep(0.8, 1.0, float(1).sub(normalY.oneMinus().mul(treeMask.oneMinus())).add(br.mul(0.1)))).toVar();
+    base.assign(mix(base, col, wg));
+    const canopy = tStylize(B.a.rgb).mul(vec3(0.6, 0.8, 0.58)).mul(mix(float(0.75), float(1), treeMask.pow(8)));
+    base.assign(mix(base, canopy, clamp(treeMask.mul(2.2).sub(0.8), 0, 1).mul(0.6)));
+    base.mulAssign(br.mul(0.35).add(1));
+    // drainage (rivers, creeks, debris flow): his white lines where the ridge map runs into its creases, as pale gravel
+    const drain = clamp(clamp(ridgeM.div(0.3), 0, 1).oneMinus().mul(1.5), 0, 1);
+    base.assign(mix(base, vec3(0.86, 0.84, 0.79), drain.mul(0.8)));
+    col.assign(base);
+    rkM.assign(wg.oneMinus().mul(dirtW.oneMinus()));   // (the rock's share: its bump in the lighting, and no grass)
+    } else {
+      // Material boundaries, BotW-style: the blend weight is a wide, smooth slope ramp, wobbled by a detail noise (the 'height map' of vertex
+      // blending) and then sharpened into a narrow edge, so grass meets earth and rock along a tight, slightly irregular line instead of a long soft
+      // fade. The bands are SLOPE's (the grass and plants follow the same ones). The wobble fades with its noise's own frequency (at distance it only
+      // crawled), and the edge widens to at least the slope's change across a pixel (no sparkle).
+      const ew = (px ? max(float(0.12), fwidth(sj).mul(2)) : float(0.12)).toVar();
+      const dW = float(0).toVar();
+      // SOIL ON THE LANDFORM (the eroded terrain): soil-mantled hollows hold colluvium on steeper ground, convex spurs and crests shed it to bare
+      // rock (Dietrich & Dunne 1978; Heimsath et al. 1997: soil thickens with convergence, thins with convexity). The wetness (groundTopo: the
+      // erosion's ridge map and the ground's relief) moves every slope limit - earth, rock, the plants' - by up to +-0.25 in sin (~+-15 deg)
+      const sSh = float(0);
+      If(sj.greaterThan(sSh.add(SLOPE.dirt - SLOPE.w)), () => {
+        const nbA = vnP(16, 11).sub(0.5).mul(keepF(16));
+        dW.assign(smoothstep(0.43, 0.57, sj.sub(sSh).sub(SLOPE.dirt).div(ew).add(0.5).add(nbA.mul(0.5))));
+        // (in patches ~40 m across, so a cliff's foot is not ringed by an even earth stroke: review round 1, 'sticker outline')
+        dW.mulAssign(smoothstep(0.35, 0.6, vnP(24, 77)));
+      });
+      // scree: loose angular rock on the steep ground under the cliffs where it is dry, cold or high; bare earth stays in the wet lowlands
+      const {screeK, wScr} = cm;
+      If(wScr.greaterThan(0.002), () => {
+        const sa = tVnoise(q.mul(9).add(97), vec2(TU*9, SPER*9)), sb = vnP(55, 13).sub(0.5).mul(smoothstep(0.03/55, 0.01/55, lod));
+        const scree = mix(vec3(0.55, 0.52, 0.47), vec3(0.68, 0.64, 0.58), smoothstep(0.3, 0.7, sa)).mul(sb.mul(0.8).add(1));
+        col.assign(mix(col, mix(scree, bTint.mul(0.6).add(0.3), 0.15), wScr.mul(0.9)));
+      });
+      col.assign(mix(col, DIRT, dW.mul(0.9).mul(screeK.mul(-0.7).add(1))));
+      // BotW-style rock: smooth form, painted colour (large cool/warm patches); the relief is the bump normal in the lighting. Rock sits on the crests
+      // and walls, grass and earth in the hollows: the same warped ridge field the terrain's crags are built from (octave 2) raises the slope rock
+      // needs in hollows (rkS, up to +0.1 in sin). It never adds rock below SLOPE.rock, so the plant rules stay valid. (Nothing below can make rock
+      // where sin < SLOPE.rock - 0.05: the work is skipped there.)
+      const hasCov = cov ? cov.greaterThanEqual(0) : null;
+      If(cov ? sj.sub(sSh).greaterThan(SLOPE.rock - 0.05).or(cov.greaterThan(0.25)) : sj.sub(sSh).greaterThan(SLOPE.rock - 0.05), () => {
+        const nbB = vnP(23, 31).sub(0.5).mul(keepF(23));
+        if (UBER){   // (the eroded terrain: the soil shift above, no crag field)
+          rkM.assign(smoothstep(0.43, 0.57, sj.sub(sSh).sub(SLOPE.rock).div(ew).add(0.5).add(nbB.mul(0.35))));
+          if (cov) If(hasCov, () => { rkM.assign(smoothstep(0.43, 0.57, cov.add(nbB.mul(0.18)).sub(sSh.mul(4)))); });
+        } else {
+        const Lw = LF.cragWL, W = LF.cragW, Lk = LF.cragL[1];
+        const wa = tPnoiseD(vec2(q.x.div(Lw).add(3.7), q.y.mod(256*Lw).div(Lw).add(8.1)), TU/Lw, tw(q)).x, wb = tPnoiseD(vec2(q.x.div(Lw).add(41.3), q.y.mod(256*Lw).div(Lw).add(2.9)), TU/Lw, tw(q)).x;
+        const wq = q.add(vec2(wa, wb).mul(W));
+        const cn = tPnoiseD(vec2(wq.x.div(Lk).add(26.3), wq.y.mod(256*Lk).div(Lk).add(5.1)), TU/Lk, tw(q)).x;
+        const rkS = clamp(float(1).sub(abs(cn).mul(1.5)), 0, 1).oneMinus().mul(0.1);
+        rkM.assign(smoothstep(0.43, 0.57, sj.sub(rkS).sub(SLOPE.rock).div(ew).add(0.5).add(nbB.mul(0.35))));
+        // with baked coverage: a crisp edge at 50% of the texel's area being rock, keeping the same wobble and crest bias (scaled into coverage)
+        if (cov) If(hasCov, () => { rkM.assign(smoothstep(0.43, 0.57, cov.add(nbB.mul(0.18)).sub(rkS.mul(4)))); });
+        }
+        const n1 = tVnoise(q.mul(3).add(5), vec2(TU*3, SPER*3));
+        rockC.assign(mix(vec3(0.80, 0.80, 0.79), vec3(0.88, 0.83, 0.74), smoothstep(0.25, 0.75, n1)).mul(B.s.rgb));   // cool blue-grey to warm cream, in the biome's stone tint
+      });
+      col.assign(mix(col, rockC, rkM));
+    }
     // beaches: a band of pale sand up to ~10 m above the water on gentle ground; darker wet sand at the line
     const beach = smoothstep(0.006, 0.016, elev).oneMinus().mul(smoothstep(0.2, 0.3, sj).oneMinus()).mul(hasW).mul(B.l.w.oneMinus());
     col.assign(mix(col, SAND.mul(mix(vec3(1), vec3(0.86, 0.85, 0.84), smoothstep(0, 0.006, elev).oneMinus())), beach));
@@ -2558,7 +2609,7 @@ function makeLib(qy = null){
     const edge = smoothstep(thr.sub(0.07), thr.sub(0.012), fF).mul(forest.oneMinus()).toVar();
     return {forest, edge, cover: forest.mul(smoothstep(0, 0.12, B.f.x))};
   };
-  return {groundTopo, forestField, tAirHazeE, tBedDepth, bedSlope, capShade, tVnoise, tVnoiseD, tPnoiseD, tDials, regions, terrainAt, analyticBaked, groundBaked, tBiomeAt, gateFade, trackFade, sectorOf, railBed, surface, tClimateMat, tAirHaze, waterLook, finish, tStylize, tTrackDist, tCloud, tWeather, cloudsAt, cloudShade, cloudCover};
+  return {ruBreakup, groundTopo, forestField, tAirHazeE, tBedDepth, bedSlope, capShade, tVnoise, tVnoiseD, tPnoiseD, tDials, regions, terrainAt, analyticBaked, groundBaked, tBiomeAt, gateFade, trackFade, sectorOf, railBed, surface, tClimateMat, tAirHaze, waterLook, finish, tStylize, tTrackDist, tCloud, tWeather, cloudsAt, cloudShade, cloudCover};
 }
 // the stylised light: tilted off the vertical, mostly down the Way
 const lightDir = (up, T) => up.mul(L_CA).add(vec3(0, 0, -L_CZ).add(T.mul(L_SZ)).mul(L_SA));
@@ -3024,13 +3075,13 @@ CL.KSH = -9 - CL.L0;
 // the erosion's ridge map at camera-relative qr (-1 creases .. 1 ridges; 0 where no level covers it or with the classic terrain): from level kf,
 // or the first coarser one whose window holds qr (a coarser level's map has fewer octaves: only the broader gullies). Hardware-filtered: it
 // shades and thresholds, it never shapes the ground
-// clipRidgeV: the whole atlas texel (0..1: R the level's crest/crease map, G Rune's ridge map, B his erosion offset, A his tree factor; see CL.rdRt)
+// clipRidgeV: the whole atlas texel (0..1: R Rune's detail noise (breakup), G his ridge map, B his erosion offset, A his tree factor; see CL.rdRt)
 function clipRidgeV(kf, qr){
   if (!UBER) return vec4(0.5, 0.5, 0.5, 0);
   const kj = clipFindLevel(kf, qr).toVar(), t = clipT(min(kj, float(CL.NL - 1)), qr).toVar();
   return select(kj.greaterThan(98), vec4(0.5, 0.5, 0.5, 0), rdTexN.sample(clipUV(min(kj, float(CL.NL - 1)), t.x, t.y)).level(0));
 }
-const clipRidge = (kf, qr) => clipRidgeV(kf, qr).x.mul(2).sub(1);
+const clipRidge = (kf, qr) => clipRidgeV(kf, qr).y.mul(2).sub(1);   // (his ridge map)
 function clipAO(dNoise, qr){
   const kp = max(clipLevel(dNoise), CL.KSH).toVar(), k0 = floor(kp).toVar();
   const one = kf => { const t = clipT(kf, qr).toVar(); return select(clipInside(t), aoTexN.sample(clipUV(kf, t.x, t.y)).level(0).x, float(1)); };
@@ -3107,18 +3158,12 @@ CL.rdScene = new THREE.Scene();
 CL.rdQuad = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), (() => {
   const m = new THREE.MeshBasicNodeMaterial({side: THREE.DoubleSide, depthTest: false, depthWrite: false, toneMapped: false}); m.fog = false;
   const src = texture(CL.hrt[0].texture), NN = CL.N;
-  // (the CREASES AND CRESTS THE LEVEL DRAWS: the height against the mean of two rings around it, 2 and 4 texels out, as an angle - the
-  // Topographic Position Index at the level's own scale (Weiss 2001), like the AO: tens of metres near you, kilometres far off. The filter's own
-  // ridge map marks every octave's stripe crest down to 60 m - a field of dashes, not the gully lines the eye sees)
+  // R: his detail noise (Buffer B, 'breakup'), computed here at the level's texels
   m.fragmentNode = Fn(() => {
     const ix = floor(uv().x.mul(NN)), iy = floor(uv().y.mul(NN)), sp = exp2(U_BK.add(CL.L0)).div(SUK);   // (texel, km)
     const rd = (dx, dy) => { const v = clamp(iy.add(dy), 0, NN - 1).add(0.5).div(NN); return src.sample(vec2(clamp(ix.add(dx), 0, NN - 1).add(0.5).div(NN), CL.flip ? float(1).sub(v) : v)).level(0); };
-    const c = rd(0, 0), tpi = float(0).toVar();
-    for (const r of [2, 4]){
-      const ring = float(0).toVar();
-      for (let d = 0; d < 8; d++){ const a = d*Math.PI/4; ring.addAssign(rd(Math.round(Math.cos(a)*r), Math.round(Math.sin(a)*r)).x); }
-      tpi.addAssign(c.x.sub(ring.div(8)).div(sp.mul(r)).mul(0.5));
-    }
+    const c = rd(0, 0), {ruBreakup} = makeLib(QY), s0 = exp2(U_BK.add(CL.L0));
+    const brk = ruBreakup(vec2(U_BO.x.add(ix.mul(s0)), iy.mul(s0)), s0);
     // G, B: Rune's ridge map and erosion offset (carried in y, z by the heights-only bake); A: his tree factor (GetTreesAmount without its height
     // term - the tree line comes from the climate where it is used): eroded hollows (occlusion), near-flat ground (normal y), off the ridges,
     // above the water (his 0.007 units over the water line)
@@ -3126,8 +3171,8 @@ CL.rdQuad = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), (() => {
     const normalY = float(1).div(sqrt(gx.mul(gx).add(gy.mul(gy)).add(1))), occ = eroD.add(0.5);
     const trees = smoothstep(0, 0.4, occ).mul(smoothstep(0.95, 1, normalY)).mul(smoothstep(-1.4, 0, ridge)).mul(smoothstep(0, U_RUNU.div(SUK).mul(0.007), c.x));
     const none = c.w.greaterThanEqual(98);
-    return vec4(select(none, float(0.5), clamp(tpi.div(0.12).mul(0.5).add(0.5), 0, 1)), select(none, float(0.5), clamp(ridge.mul(0.5).add(0.5), 0, 1)),
-      select(none, float(0.5), clamp(eroD.mul(0.5).add(0.5), 0, 1)), select(none, float(0), trees));   // (R: +-0.12: a hollow or rib ~7 deg below / above its surroundings is a full crease / crest)
+    return vec4(select(none, float(0.5), clamp(brk.mul(0.5).add(0.5), 0, 1)), select(none, float(0.5), clamp(ridge.mul(0.5).add(0.5), 0, 1)),
+      select(none, float(0.5), clamp(eroD.mul(0.5).add(0.5), 0, 1)), select(none, float(0), trees));
   })();
   return m;
 })());
@@ -3498,8 +3543,8 @@ function makeTerrainMat(clip){
     const wfar = smoothstep(WFAR0 - 1.5, WFAR0, dist).mul(tstep(0.004, wl)).toVar();
     const covP = float(-1).toVar(); If(F.w.lessThan(0.999), () => { covP.assign(clipCov(dN, vQr)); });
     If(F.w.greaterThan(0.001), () => { covP.assign(select(covP.lessThan(0), F.cv, mix(covP, F.cv, F.w))); });
-    const rP = groundRidge(dN, vQr).mul(vR.z).toVar();   // (per pixel: the gully lines are finer than the far vertices)
-    const s = surface(B, vH, hP.x.mul(vR.z), vQ, lod, slope, sectorOf(vTh), true, true, covP, vQr.add(CL.camM), vF.y, rP);
+    const rvP = groundRuneV(dN, vQr).toVar(), rP = rvP.y.mul(2).sub(1).mul(vR.z).toVar();   // (per pixel: his masks, finer than the far vertices)
+    const s = surface(B, vH, hP.x.mul(vR.z), vQ, lod, slope, sectorOf(vTh), true, true, covP, vQr.add(CL.camM), vF.y, rvP);
     const col = cityPaint(railBed(s.col, vTh, vZ), dSt).toVar(), em = vec3(s.em).toVar();   // (roads are their own mesh)
     // FOREST CANOPY painted on the ground under the forest map's stands (the trees' own map: forestField), so woods read as masses to the far end
     // of the tube where no tree is drawn, and the real trees stand on their own colour where they are: their foliage palette (the land's lowland
@@ -5513,8 +5558,8 @@ function makeGrassRing(cfg){
     const RT = T.mul(float(R).sub(H).mul(TAU/TU)).toVar(), AY = vec3(0, 0, -1/SUK);
     const exN = ex => { const nn = normalize(cross(up.mul(dH.x.mul(ex)).add(RT), up.mul(dH.y.mul(ex)).add(AY))).toVar(); If(dot(nn, up).lessThan(0), () => { nn.assign(nn.negate()); }); return nn; };
     const n = exN(1), slope = clamp(dot(n, up), 0, 1).oneMinus().toVar();
-    const wetG = mix(float(0.5), groundTopo(qr, hT.x), fd).toVar(), rG = groundRidge(dN, qr).mul(fd).toVar();
-    const s = surface(B, hT.w, hT.x.mul(fd), q, float(0.002), slope, sectorOf(th), true, false, null, null, wetG, rG);   // (the terrain's lushness: the same wetness)
+    const wetG = mix(float(0.5), groundTopo(qr, hT.x), fd).toVar(), rvG = groundRuneV(dN, qr).toVar(), rG = rvG.y.mul(2).sub(1).mul(fd).toVar();
+    const s = surface(B, hT.w, hT.x.mul(fd), q, float(0.002), slope, sectorOf(th), true, false, null, null, wetG, rvG);   // (the terrain's lushness: the same wetness)
     const col = railBed(s.col, th, z).toVar();
     // grass only where the ground shown is grass (its actual colour is green: not the dirt, rock, sand or dry patches
     // the terrain paints over a green biome), dry, gentle, no rails, paving, roads or streets
@@ -6141,8 +6186,8 @@ function makeFloraLattice(cfg){
       const upG = upAt(th), TG = tanAt(th);
       const nG = normalize(cross(upG.mul(dHg.x).add(TG.mul(float(R).sub(H).mul(TAU/TU))), upG.mul(dHg.y).add(vec3(0, 0, -1/SUK)))).toVar();
       If(dot(nG, upG).lessThan(0), () => { nG.assign(nG.negate()); });
-      const rF = groundRidge(dN, qr).mul(fd).toVar();
-      const sG = surface(B, hT.w, hT.x.mul(fd), q, float(0.002), clamp(dot(nG, upG), 0, 1).oneMinus(), sectorOf(th), true, false, null, null, wet, rF);
+      const rvF = groundRuneV(dN, qr).toVar(), rF = rvF.y.mul(2).sub(1).mul(fd).toVar();
+      const sG = surface(B, hT.w, hT.x.mul(fd), q, float(0.002), clamp(dot(nG, upG), 0, 1).oneMinus(), sectorOf(th), true, false, null, null, wet, rvF);
       const cG = railBed(sG.col, th, z);
       const grassy = cG.g.greaterThan(cG.r.mul(1.04)).and(cG.g.greaterThan(cG.b.mul(1.1)));
       const dens = (cfg.bush ? forest.mul(0.18).add(edge.mul(0.75)).add(thicket.mul(0.4)).mul(smoothstep(0, 0.1, B.f.z))
