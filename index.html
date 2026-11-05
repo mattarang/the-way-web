@@ -247,7 +247,7 @@ button:disabled{opacity:.45}
   <button id="b-perf" class="perfbtn" type="button">Performance monitor: off</button>
   <button id="b-pos" class="perfbtn" type="button">Copy position (for bug reports)</button>
   <button id="b-exact" class="perfbtn" type="button">Exact near ground: off (experimental)</button>
-  <button id="b-rukm" class="perfbtn" type="button">Terrain scale: 12 km per Rune unit</button>
+  <button id="b-rukm" class="perfbtn" type="button">Terrain scale: 24 km per Rune unit</button>
   <button id="b-ruc" class="perfbtn" type="button">Terrain noise centre: +0.14</button>
   <button id="b-hmap" class="perfbtn" type="button">Heightmap debug: off</button>
   <button id="b-hide" class="perfbtn" type="button">Hide (profiling): nothing</button>
@@ -737,11 +737,11 @@ function uberH(qx, qy, wl = 0, amp = 1, dl = null, lod = 0){   // (Rune's terrai
 // (ruNoised, ruPhacelle, ruHeight and their GPU twins) is subject to the terms of the Mozilla Public License, v. 2.0. If a copy of the MPL was not
 // distributed with this file, You can obtain one at https://mozilla.org/MPL/2.0/.
 // Adapted only where the world needs it: (1) Rune's fract() hash -> our integer lattice hash (hashI), each lattice WRAPPED around the ring and the
-// Way (its cell count per axis rounded: <0.5% stretch), so the terrain is seamless and precise anywhere; (2) one Rune unit = RU.km km (the Debug
+// Way (its cell count per axis rounded: <0.5% stretch), so the terrain is seamless and precise anywhere; (2) one Rune unit = RU.km km (24: his demo box becomes a ~24 km range of a few big mountains; the Debug
 // menu's terrain scale); (3) the world's variety drives only his height amplitude and erosion strength (relK: our mountain mask x regional relief;
 // at 0 strength his terrain is the gentle green panel of his comparison); (4) level of detail: an octave whose wavelength is under ~4-8 samples
 // fades to the filter's own fade target (its notion of the mean below that detail), so coarse levels hold what they can and agree with the fine.
-const RU = {km: 12, scale: 0.15, strength: 0.22, gully: 0.5, detail: 1.5, round: [0.1, 0.0, 0.1, 2.0], onset: [1.25, 1.25, 2.8, 1.5], aslope: [0.7, 1.0],
+const RU = {km: 24, scale: 0.15, strength: 0.22, gully: 0.5, detail: 1.5, round: [0.1, 0.0, 0.1, 2.0], onset: [1.25, 1.25, 2.8, 1.5], aslope: [0.7, 1.0],
   cell: 0.7, norm: 0.5, oct: 5, lac: 2.0, gain: 0.5, hoff: [-0.65, 0.0], hfreq: 3.0, hamp: 0.125, hoct: 3, hlac: 2.0, hgain: 0.1,
   center: 0.14, relLow: 0.3, fillEro: false};   // center: how far (Rune units, x the relief) his terrain's mid height sits above our water line (0)   // relLow: lowland relief vs mountain (x the regional relief); fillEro: the CPU fast fill runs the erosion too (lab)
 const ruNU = () => RU.km*SUK;   // noise units per Rune unit
@@ -6859,7 +6859,7 @@ function setRuKm(km){
   $('b-rukm').textContent = 'Terrain scale: ' + km + ' km per Rune unit';
   for (const o of CL.forg) o.set(1e9, 1e9); clipRebakeHere();
 }
-{ let k = 12; try { k = +localStorage.getItem('wayRuKm') || 12; } catch (e) {} if (!RU_KMS.includes(k)) k = 12; RU.km = k; U_RUNU.value = k*SUK; $('b-rukm').textContent = 'Terrain scale: ' + k + ' km per Rune unit'; }
+{ let k = 24; try { k = +localStorage.getItem('wayRuKm') || 24; } catch (e) {} if (!RU_KMS.includes(k)) k = 24; RU.km = k; U_RUNU.value = k*SUK; $('b-rukm').textContent = 'Terrain scale: ' + k + ' km per Rune unit'; }
 $('b-rukm').addEventListener('click', () => setRuKm(RU_KMS[(RU_KMS.indexOf(RU.km) + 1) % RU_KMS.length]));
 window.__rukm = setRuKm;
 // THE NOISE CENTRE: how high his terrain's mid height sits above the water line (Rune units x the relief; 0.14 x 12 km ~ 1.7 km on mountains)
