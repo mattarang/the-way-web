@@ -373,8 +373,10 @@ const NBW = NBT + 8;           // texture columns: 256 Way cells + chamber biome
 const SLOPE = {dirt: 0.50, rock: 0.53, w: 0.12};
 const sin2tan = x => x/Math.sqrt(1 - x*x);
 // the soil's slope-limit shift (sin) for groundTopo's wetness w (0 crest .. 0.5 neutral .. 1 hollow), and the plants' limit as a tangent
-const soilShift = w => w.sub(0.5).mul(0.24);
-const plantTan = (sin0, w) => { const sl = clamp(soilShift(w).mul(UBER ? 1 : 0).add(sin0), 0.05, 0.95); return sl.div(sqrt(sl.mul(sl).oneMinus())); };
+// r: the erosion's ridge map at the pixel (-1 creases .. 1 crests): the gully lines themselves (+-0.28 in sin: green holds up a crease's 45+ deg
+// walls, crests go bare from ~17 deg); w adds the broader landform gently (+-0.06), so whole hills don't turn to rock
+const soilShift = (w, r) => w.sub(0.5).mul(0.12).sub(r.mul(0.28));
+const plantTan = (sin0, w, r) => { const sl = clamp(soilShift(w, r).mul(UBER ? 1 : 0).add(sin0), 0.05, 0.95); return sl.div(sqrt(sl.mul(sl).oneMinus())); };
 const SLOPE_DIRT = [SLOPE.dirt - SLOPE.w/2, SLOPE.dirt + SLOPE.w/2];   // the earth edge's ramp (sin)
 const SLOPE_GRASS_TAN = sin2tan(SLOPE.dirt), SLOPE_BUSH_TAN = sin2tan(SLOPE.dirt), SLOPE_TREE_TAN = sin2tan(SLOPE.dirt - 0.03);   // tan of the steepest ground: grass and bushes 30 deg, trees 28
 const ORD = ['First','Second','Third','Fourth','Fifth','Sixth','Seventh'];
@@ -646,7 +648,7 @@ function basinB(qx, qy){
 // (after dandrino/terrain-erosion-3-ways: ONE large, low-frequency warp - it bends ranges and coasts; the finer warp layer smeared ridges into
 // swirls - smooth plain fBm on low ground - billowed |n| folds there were pits - and the classic per-octave gain of 1/2)
 const UB = {L0: 16, N: 4, warpL: 32, k0: 0.045, m0: 0.2328, zN: 0.127, mtn0: 0.3, mtnA: 0.6, wet: 0.6, tierKm: 0.25,
-  sharpRamp: 2, sharp0: 0.2, sharpM: 0.6, sharpR: 0.6, ero0: 0.35, eroM: 0.3, gain: 0.5, warp0: 3, low0: 0.10, lowA: 0.25, altEro: 0.3,
+  sharpRamp: 2, sharp0: 0.1, sharpM: 0.25, sharpR: 0.6, ero0: 0.35, eroM: 0.3, gain: 0.5, warp0: 3, low0: 0.10, lowA: 0.25, altEro: 0.3,
   expMu: 1.0001, warp2: 0, rel0: 0.55, relA: 1.0,
   // EROSION FILTER over the smooth base (N = 4 octaves: 16 .. 2 km): cells EC0 noise units (~0.98 km) halving over EN octaves (to ~61 m; every cell
   // divides TU and SPER: no seams), gully depth ES x 481.5 m at the first octave (lab: ~0.1 of the cell), ridge / crease rounding ERR / ERC
@@ -2183,7 +2185,8 @@ function makeLib(qy = null){
   // h: the function's own height (palette, emission); H: the baked height in km above sea level, as drawn (the water line, elevations, bed depth);
   // lod: the pixel's footprint in noise units (fades detail finer than a pixel); slope: 1 - cos of the slope angle; px: called from a pixel shader
   // (screen-space derivatives exist there; placement's compute shaders call it too, and must match the painted colour where it matters).
-  function surface(B, h, H, q, lod, slope, sector, seabed, px = false, cov = null, qPrec = null, topo = null){   // topo: groundTopo's wetness (0.5 if not given)   // qPrec: q mod 32 computed precisely (camera-relative + camM), terrain pixels only   // cov: the baked rock coverage (-1: none), terrain pixels only
+  function surface(B, h, H, q, lod, slope, sector, seabed, px = false, cov = null, qPrec = null, topo = null, ridge = null){   // ridge: the erosion's ridge map here (groundRidge)
+    // topo: groundTopo's wetness (0.5 if not given)   // qPrec: q mod 32 computed precisely (camera-relative + camM), terrain pixels only   // cov: the baked rock coverage (-1: none), terrain pixels only
     const amp = B.a.w.mul(5).toVar(), wl = B.e.w;
     // fine noise coordinates: q mod 32 (32 divides TU and SPER), precise where the caller has them (q itself is float32: ~1 m steps far along)
     const qP = (qPrec ? qPrec.mod(32) : q.mod(32)).toVar(), vnP = (f, off) => tVnoise(qP.mul(f).add(off), vec2(32*f));
@@ -2276,8 +2279,8 @@ function makeLib(qy = null){
     const dW = float(0).toVar();
     // SOIL ON THE LANDFORM (the eroded terrain): soil-mantled hollows hold colluvium on steeper ground, convex spurs and crests shed it to bare
     // rock (Dietrich & Dunne 1978; Heimsath et al. 1997: soil thickens with convergence, thins with convexity). The wetness (groundTopo: the
-    // erosion's ridge map and the ground's relief) moves every slope limit - earth, rock, the plants' - by up to +-0.12 in sin (~+-8 deg)
-    const sSh = (UBER ? soilShift(topo ?? float(0.5)) : float(0)).toVar();
+    // erosion's ridge map and the ground's relief) moves every slope limit - earth, rock, the plants' - by up to +-0.25 in sin (~+-15 deg)
+    const sSh = (UBER ? soilShift(topo ?? float(0.5), ridge ?? float(0)) : float(0)).toVar();
     If(sj.greaterThan(sSh.add(SLOPE.dirt - SLOPE.w)), () => {
       const nbA = vnP(16, 11).sub(0.5).mul(keepF(16));
       dW.assign(smoothstep(0.43, 0.57, sj.sub(sSh).sub(SLOPE.dirt).div(ew).add(0.5).add(nbA.mul(0.5))));
@@ -2771,6 +2774,8 @@ const CDL = {P: 20, TOP: 14, MAXN: 4096};
 // spacings), (C + 2.83 P)/(2C), or the coarser side's odd vertices slide where the finer side's don't (a hairline step along node edges)
 const cdMorphStart = C => Math.max(0.75, (C + 2.83*CDL.P)/(2*C));
 const U_CDR = uniform(80), U_CDMS = uniform(cdMorphStart(80)), U_CDH = uniform(0), U_QT = uniform(0);   // (U_CDH: the ground's height under the camera, km: the LOD distances are measured to the ground at that height)   // (U_CRAG: a debug scale on the crags, for isolating them; 1 in play)   // (U_REF: the terrain pixels' reference mode, see the terrain material)
+// the ridge map at the level the ground is drawn from dNoise away (see clipRidge)
+const groundRidge = (dNoise, qr) => clipRidge(floor(clipLevel(dNoise)), qr);
 const clipLevel = dNoise => clamp(log2(max(dNoise, 1e-6)).sub(Math.log2(CL.DV/2) + CL.L0).sub(U_LODB), 0, CL.NL - 1.001);
 // bilinear fetch of level kf (an integer-valued float node) at camera-relative qr: vec4(H, dH/dqx, dH/dqy, h)
 function clipFetch(kf, qr){
@@ -2941,19 +2946,27 @@ CL.bakeInto = (rt, cam, row, f) => {
   renderer.setRenderTarget(rt); renderer.render(CL.sScene, cam);
 };
 CL.cam = new THREE.OrthographicCamera(0, 1, CL.NL, 0, 0.1, 10); CL.cam.position.z = 5;
-// THE RIDGE MAP (UBER): the erosion filter's own crest / crease field (Rune Skovbo Johansen's filter: -1 in its gullies .. 1 on its ridges, as the
-// Godot project's erosion_filter_f), which the heights-only bake carries in y; this pass copies it into an 8-bit atlas laid out as the levels
-// (0.5 = neutral). It drives the wetness (groundTopo): the ground's colour, the grass and the forests follow the same gullies the heights carve.
+// THE RIDGE MAP (UBER): crests and creases of each baked level (-1 creases .. 1 crests; see the pass below), into an 8-bit atlas laid out as the
+// levels (0.5 = neutral). It drives the wetness (groundTopo): the ground's colour, the grass and the forests follow the same gullies the heights carve.
 CL.rdRt = new THREE.RenderTarget(CL.N, CL.N*CL.NL, {type: THREE.UnsignedByteType, format: THREE.RGBAFormat, minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter, depthBuffer: false, generateMipmaps: false});
 const rdTexN = texture(CL.rdRt.texture);
 CL.rdScene = new THREE.Scene();
 CL.rdQuad = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), (() => {
   const m = new THREE.MeshBasicNodeMaterial({side: THREE.DoubleSide, depthTest: false, depthWrite: false, toneMapped: false}); m.fog = false;
   const src = texture(CL.hrt[0].texture), NN = CL.N;
+  // (the CREASES AND CRESTS THE LEVEL DRAWS: the height against the mean of two rings around it, 2 and 4 texels out, as an angle - the
+  // Topographic Position Index at the level's own scale (Weiss 2001), like the AO: tens of metres near you, kilometres far off. The filter's own
+  // ridge map marks every octave's stripe crest down to 60 m - a field of dashes, not the gully lines the eye sees)
   m.fragmentNode = Fn(() => {
-    const ix = floor(uv().x.mul(NN)), iy = floor(uv().y.mul(NN)), v = iy.add(0.5).div(NN);
-    const c = src.sample(vec2(ix.add(0.5).div(NN), CL.flip ? float(1).sub(v) : v)).level(0);
-    return vec4(select(c.w.greaterThanEqual(98), float(0.5), clamp(c.y.mul(0.5).add(0.5), 0, 1)), 0, 0, 1);
+    const ix = floor(uv().x.mul(NN)), iy = floor(uv().y.mul(NN)), sp = exp2(U_BK.add(CL.L0)).div(SUK);   // (texel, km)
+    const rd = (dx, dy) => { const v = clamp(iy.add(dy), 0, NN - 1).add(0.5).div(NN); return src.sample(vec2(clamp(ix.add(dx), 0, NN - 1).add(0.5).div(NN), CL.flip ? float(1).sub(v) : v)).level(0); };
+    const c = rd(0, 0), tpi = float(0).toVar();
+    for (const r of [2, 4]){
+      const ring = float(0).toVar();
+      for (let d = 0; d < 8; d++){ const a = d*Math.PI/4; ring.addAssign(rd(Math.round(Math.cos(a)*r), Math.round(Math.sin(a)*r)).x); }
+      tpi.addAssign(c.x.sub(ring.div(8)).div(sp.mul(r)).mul(0.5));
+    }
+    return vec4(select(c.w.greaterThanEqual(98), float(0.5), clamp(tpi.div(0.12).mul(0.5).add(0.5), 0, 1)), 0, 0, 1);   // (+-0.12: a hollow or rib ~7 deg below / above its surroundings is a full crease / crest)
   })();
   return m;
 })());
@@ -3324,7 +3337,8 @@ function makeTerrainMat(clip){
     const wfar = smoothstep(WFAR0 - 1.5, WFAR0, dist).mul(tstep(0.004, wl)).toVar();
     const covP = float(-1).toVar(); If(F.w.lessThan(0.999), () => { covP.assign(clipCov(dN, vQr)); });
     If(F.w.greaterThan(0.001), () => { covP.assign(select(covP.lessThan(0), F.cv, mix(covP, F.cv, F.w))); });
-    const s = surface(B, vH, hP.x.mul(vR.z), vQ, lod, slope, sectorOf(vTh), true, true, covP, vQr.add(CL.camM), vF.y);
+    const rP = groundRidge(dN, vQr).mul(vR.z).toVar();   // (per pixel: the gully lines are finer than the far vertices)
+    const s = surface(B, vH, hP.x.mul(vR.z), vQ, lod, slope, sectorOf(vTh), true, true, covP, vQr.add(CL.camM), vF.y, rP);
     const col = cityPaint(railBed(s.col, vTh, vZ), dSt).toVar(), em = vec3(s.em).toVar();   // (roads are their own mesh)
     // FOREST CANOPY painted on the ground under the forest map's stands (the trees' own map: forestField), so woods read as masses to the far end
     // of the tube where no tree is drawn, and the real trees stand on their own colour where they are: their foliage palette (the land's lowland
@@ -3333,7 +3347,7 @@ function makeTerrainMat(clip){
     // own colour test), slopes they stand on, above the water.
     {
       const gr = smoothstep(1.0, 1.08, col.g.div(max(col.r, 1e-3))).mul(smoothstep(1.05, 1.15, col.g.div(max(col.b, 1e-3))));
-      const tT = plantTan(SLOPE.dirt - 0.03, vF.y), cMax = float(1).sub(float(1).div(sqrt(tT.mul(tT).add(1)))).toVar();   // (the trees' slope limit as 1 - cos, moved with the landform as theirs)
+      const tT = plantTan(SLOPE.dirt - 0.03, vF.y, rP), cMax = float(1).sub(float(1).div(sqrt(tT.mul(tT).add(1)))).toVar();   // (the trees' slope limit as 1 - cos, moved with the landform as theirs)
       const fc = vF.x.mul(gr).mul(smoothstep(cMax.add(0.02), cMax.sub(0.02), slope)).mul(select(vH.greaterThanEqual(wl.add(0.006)), float(1), float(0))).toVar();
       If(fc.greaterThan(0.001), () => {
         const con = clamp(B.f.y.add(smoothstep(0.3, 1.2, hP.x).mul(0.5)), 0, 1);
@@ -3466,6 +3480,7 @@ function makeTerrainMat(clip){
       If(dm.equal(12), () => { o.assign(vec3(vQH.w)); });   // haze amount
       If(dm.equal(13), () => { const dd = max(hP.x.negate().sub(LIFT), 0); o.assign(mix(mix(vec3(0, 0.1, 0.5), vec3(0, 1, 0.5), clamp(dd.mul(8), 0, 1)), vec3(1, 0.2, 0), clamp(dd.mul(8).sub(1), 0, 1))); });   // the terrain pass's own (per-pixel) water depth
       If(dm.equal(14), () => { o.assign(vec3(aoP)); });   // ambient occlusion (1 = open)
+      If(dm.equal(15), () => { o.assign(mix(mix(vec3(gray), vec3(0.1, 0.35, 1), clamp(rP.negate(), 0, 1)), vec3(1, 0.25, 0.1), clamp(rP, 0, 1))); });   // the erosion's ridge map: blue creases, red crests
       res.assign(o);
     });
     // QUADTREE VIEW (U_QT; in every build, as it must work on phones: the debug build's shader is too big for some): a colour per CDLOD
@@ -5333,8 +5348,8 @@ function makeGrassRing(cfg){
     const RT = T.mul(float(R).sub(H).mul(TAU/TU)).toVar(), AY = vec3(0, 0, -1/SUK);
     const exN = ex => { const nn = normalize(cross(up.mul(dH.x.mul(ex)).add(RT), up.mul(dH.y.mul(ex)).add(AY))).toVar(); If(dot(nn, up).lessThan(0), () => { nn.assign(nn.negate()); }); return nn; };
     const n = exN(1), slope = clamp(dot(n, up), 0, 1).oneMinus().toVar();
-    const wetG = mix(float(0.5), groundTopo(qr, hT.x), fd).toVar();
-    const s = surface(B, hT.w, hT.x.mul(fd), q, float(0.002), slope, sectorOf(th), true, false, null, null, wetG);   // (the terrain's lushness: the same wetness)
+    const wetG = mix(float(0.5), groundTopo(qr, hT.x), fd).toVar(), rG = groundRidge(dN, qr).mul(fd).toVar();
+    const s = surface(B, hT.w, hT.x.mul(fd), q, float(0.002), slope, sectorOf(th), true, false, null, null, wetG, rG);   // (the terrain's lushness: the same wetness)
     const col = railBed(s.col, th, z).toVar();
     // grass only where the ground shown is grass (its actual colour is green: not the dirt, rock, sand or dry patches
     // the terrain paints over a green biome), dry, gentle, no rails, paving, roads or streets
@@ -5345,7 +5360,7 @@ function makeGrassRing(cfg){
     const straw = col.r.greaterThanEqual(col.g).and(col.g.greaterThan(col.b.mul(1.25))).and(cmG.wSand.lessThan(0.3)).and(cmG.wReg.lessThan(0.3)).and(s.rk.lessThan(0.3));
     const ok = green.or(straw).and(hT.w.greaterThanEqual(wl)).and(H.greaterThan(0.02))
       .and(B.x.x.lessThan(0.3)).and(U.uSs.sub(z).lessThan(0).and(tTrackDist(th).lessThan(0.15)).not())
-      .and(length(dH).mul(SUK).lessThan(plantTan(SLOPE.dirt, wetG)))   // (the soil's limit moves with the landform: see surface)
+      .and(length(dH).mul(SUK).lessThan(plantTan(SLOPE.dirt, wetG, rG)))   // (the soil's limit moves with the landform: see surface)
       .and(abs(roadNode(z, th).x).greaterThan(ROAD.FULL + 0.4)).and(cityStreetNode(z, th).greaterThan(CITY_HALF + 0.0045));
     const rr = float(R).sub(H).add(0.00012);   // roots just below the surface
     rootB.element(sid).assign(vec4(radAt(th).xy.mul(rr), sa.negate(), select(ok, hash01(r2).mul(0.4).add(0.85).mul(u.sz), float(0))));
@@ -5961,7 +5976,8 @@ function makeFloraLattice(cfg){
       const upG = upAt(th), TG = tanAt(th);
       const nG = normalize(cross(upG.mul(dHg.x).add(TG.mul(float(R).sub(H).mul(TAU/TU))), upG.mul(dHg.y).add(vec3(0, 0, -1/SUK)))).toVar();
       If(dot(nG, upG).lessThan(0), () => { nG.assign(nG.negate()); });
-      const sG = surface(B, hT.w, hT.x.mul(fd), q, float(0.002), clamp(dot(nG, upG), 0, 1).oneMinus(), sectorOf(th), true, false, null, null, wet);
+      const rF = groundRidge(dN, qr).mul(fd).toVar();
+      const sG = surface(B, hT.w, hT.x.mul(fd), q, float(0.002), clamp(dot(nG, upG), 0, 1).oneMinus(), sectorOf(th), true, false, null, null, wet, rF);
       const cG = railBed(sG.col, th, z);
       const grassy = cG.g.greaterThan(cG.r.mul(1.04)).and(cG.g.greaterThan(cG.b.mul(1.1)));
       const dens = (cfg.bush ? forest.mul(0.18).add(edge.mul(0.75)).add(thicket.mul(0.4)).mul(smoothstep(0, 0.1, B.f.z))
@@ -5969,7 +5985,7 @@ function makeFloraLattice(cfg){
       const clearR = cfg.bush ? 7 : 10;   // m from a road's centre line that stays clear of plants
       const ok = hash01(r2).lessThan(dens).and(abs(roadNode(z, th).x).greaterThan(clearR)).and(cityStreetNode(z, th).greaterThan(CITY_HALF + 0.012)).and(hT.w.greaterThan(wl.add(0.006))).and(H.greaterThan(0.022)).and(fd.greaterThan(0.95))
         .and(B.x.x.lessThan(0.3)).and(U.uSs.sub(z).lessThan(0).and(tTrackDist(th).lessThan(0.25)).not())
-        .and(length(hT.yz).mul(SUK).lessThan(plantTan(cfg.bush ? SLOPE.dirt : SLOPE.dirt - 0.03, wet)));   // (the soil's limit moves with the landform: see surface)
+        .and(length(hT.yz).mul(SUK).lessThan(plantTan(cfg.bush ? SLOPE.dirt : SLOPE.dirt - 0.03, wet, rF)));   // (the soil's limit moves with the landform: see surface)
       // species: conifers by the biome's share, more of them up high
       const conifer = cfg.bush ? float(0) : select(hash01(r3).lessThan(B.f.y.add(smoothstep(0.3, 1.2, H).mul(0.5))), float(1), float(0));
       const size = hash01(r4).mul(0.5).add(0.75).mul(B.f.w.mul(2)).toVar();
@@ -6716,7 +6732,7 @@ $('b-wp').addEventListener('click', openSheet);
 $('b-perf').addEventListener('click', () => setPerf(!perfOn));
 $('b-hmap').addEventListener('click', () => setHmap(!hmapOn));
 $('b-hide').addEventListener('click', () => { profHide = (profHide + 1) % PROF_HIDE.length; $('b-hide').textContent = 'Hide (profiling): ' + PROF_HIDE[profHide]; });
-const DBG_NAMES = ['off', 'normals', 'curvature', 'slope / rock', 'mesh spacing', 'mesh vs true normal', 'shadows', 'height contours', 'mesh height error', 'water line', 'albedo', 'light multiplier', 'haze', 'water depth', 'ambient occlusion'];
+const DBG_NAMES = ['off', 'normals', 'curvature', 'slope / rock', 'mesh spacing', 'mesh vs true normal', 'shadows', 'height contours', 'mesh height error', 'water line', 'albedo', 'light multiplier', 'haze', 'water depth', 'ambient occlusion', 'ridge map'];
 // The debug views cost registers on every pixel, so the everyday terrain and water shaders are built without them; the first time a view is
 // picked, both are rebuilt with them (a few seconds of compiling, once) and swapped in. (They were only reachable with ?dbg, which a shared
 // link can't carry, so the button had stopped working.)
