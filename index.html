@@ -643,7 +643,7 @@ const LF = {valleyD: 0.35, valleyW: 0.14, valleyL: 8, moundA: 0.2, moundC: 1.6, 
 function lfRegions(qx, qy){
   return [pnoise(qx/32 + 11.3, pmod(qy, 256*32)/32 + 4.1, 5, qy/DWU), pnoise(qx/32 + 19.7, pmod(qy, 256*32)/32 + 8.3, 5, qy/DWU)];
 }
-function landforms(qx, qy, h, wl, det = 0, amp = 1, mesa = 0){
+function landforms(qx, qy, h, wl, det = 0, amp = 1, mesa = 0, guideAt = null, guideOnly = false){   // guideAt(x, y): the terraces' guide elsewhere (its slope)
   const [rA, rB] = lfRegions(qx, qy);
   const hrPre = h - wl;   // (the crags' high-ground weight is measured before the valleys and mounds, as on the GPU)
   const wS = Math.max(smooth(0.1, 0.28, rA), mesa*LF.mesaW), wV = smooth(0.05, -0.25, rB)*(1 - 0.5*wS), wM = smooth(0.12, 0.3, rB);
@@ -670,20 +670,26 @@ function landforms(qx, qy, h, wl, det = 0, amp = 1, mesa = 0){
   // terraces on hills and lowland (faded out on high mountains); smootherstep risers ease into and out of each step
   const wT = wS*(1 - smooth(0.5, 1.0, hr0));
   let riser = 0;
+  if (guideOnly && !(wT > 0 && hr0 - det > 0)) return hr0 - det;
   if (wT > 0 && hr0 - det > 0){
     // the steps follow the smooth large-scale form (the height without its fine creases), and the creases ride on
     // top of the terraced form: clean tiers, with gullies running down their faces
     const hb = hr0 - det, N = Math.max(LF.terN, amp/LF.tierKm);   // tier height is at most LF.tierKm, however tall the terrain
+    if (guideOnly) return hb;
     const th = hb*N + 1.2*nv, f = th - Math.floor(th), u = Math.min(1, f/(LF.terK + LF.mesaK*mesa));
     const tk = Math.floor(th), Tk = tk + (hashI(pmod(tk, 289), 13) - 0.5)*LF.bedVar, Tk1 = tk + 1 + (hashI(pmod(tk + 1, 289), 13) - 0.5)*LF.bedVar;   // (beds of unequal thickness, as the GPU)
     const T = (Tk + (Tk1 - Tk)*u*u*u*(u*(u*6 - 15) + 10) - 1.2*nv)/N;
     const gate = smooth(0, 0.1, hb);   // gated by the smooth guide's height, which changes slowly (the creased height rose ~160 m in 40 m here)
-    // bed hardness per tier, varying along strike (see the GPU's landformsD; the GPU also lets soil cover the beds on gentle slopes, which needs
-    // the slope this CPU path doesn't have: it only stands in until the bake's read-back arrives)
+    // bed hardness per tier, varying along strike (see the GPU's landformsD), and soil over the beds on gentle slopes (gS, below)
     // (one hardness per shelf, changing only across the riser below it (from the bed beneath to this one): blended across the whole shelf, a hard
     // bed under a soft one tilted the shelf back into the slope - a ditch at the foot of every riser, the riser left standing as a wall)
     const ti = Math.floor(th), lat = pnoise(qx/1.6 + 71, pmod(qy, 256*1.6)/1.6 + 13, TU/1.6, qy/DWU), bq = u*u*u*(u*(u*6 - 15) + 10);
-    const sB = smooth(0.35, 0.75, hashI(pmod(ti - 1, 289), 7)*(1 - bq) + hashI(pmod(ti, 289), 7)*bq + 0.5*lat);
+    // soil mantles the beds on gentle ground (the GPU's gS, from the guide's slope in km per km): without it this copy kept full ledges on gentle
+    // terraced plains where the drawn ground has none, and the roads, rocks and tiles built from it floated or sank by tens of metres
+    let gS = 1;
+    if (guideAt){ const e = 0.002, gx = (guideAt(qx + e, qy) - guideAt(qx - e, qy))/(2*e), gy = (guideAt(qx, qy + e) - guideAt(qx, qy - e))/(2*e);
+      gS = smooth(0.035, 0.12, Math.hypot(gx, gy)*amp*SUK); }
+    const sB = smooth(0.35, 0.75, hashI(pmod(ti - 1, 289), 7)*(1 - bq) + hashI(pmod(ti, 289), 7)*bq + 0.5*lat)*gS;
     h += ((Math.max(T, 0) - hb)*sB - LF.terCreep*det)*wT*gate;
     riser = 4*u*(1 - u)*wT*gate*sB;
   }
@@ -702,7 +708,7 @@ function landforms(qx, qy, h, wl, det = 0, amp = 1, mesa = 0){
   }
   return h;
 }
-function terrainH(qx, qy, wl = 0, amp = 1, dl = null){
+function terrainH(qx, qy, wl = 0, amp = 1, dl = null, guideOnly = false){
   const d = [1.75*grid1(qx, qy)], dsoft = [];   // (dsoft: the same octaves with rounded crests, which the terraces follow)
   // dials (mirrors the shader): domain warp of the fold octaves, their gain about their mean, ridge (extra fine-octave gain)
   let wx = qx, wy = qy; const gW = dl ? dl[0] : 0, gG = dl ? dl[1] : 1, gR = dl ? dl[3] : 0;
@@ -728,7 +734,8 @@ function terrainH(qx, qy, wl = 0, amp = 1, dl = null){
   const m5 = OCT_MEAN[5]*5*1.75, e1 = d[1] - m5;
   const detLow = (g0 + 0.6*e1 + 0.6*(d[2] - dsoft[1]) + 0.25*(d[3] - dsoft[2]))/DREF;
   const detFull = (g0 + e1 + (d[2] - dsoft[1]) + (d[3] - dsoft[2]))/DREF*(1 + (fM - 1)*smooth(0, 0.12, hFullPre - wl));   // (ramps in: a hard switch at the water line shifted every terrace by ~0.4 km)
-  return landforms(qx, qy, hLow + (hFull - hLow)*m, wl, detLow + (detFull - detLow)*m, amp, dl ? dl[2] : 0) + basinBias(qx, qy, wl);
+  if (guideOnly) return landforms(qx, qy, hLow + (hFull - hLow)*m, wl, detLow + (detFull - detLow)*m, amp, dl ? dl[2] : 0, null, true);
+  return landforms(qx, qy, hLow + (hFull - hLow)*m, wl, detLow + (detFull - detLow)*m, amp, dl ? dl[2] : 0, (x, y) => terrainH(x, y, wl, amp, dl, true)) + basinBias(qx, qy, wl);
 }
 // the biomes' water levels were written as fractions of the land under water: map them onto this height's
 // distribution (percentiles of the example's data, measured)
@@ -1312,9 +1319,17 @@ function adaptResolution(realDt){
 }
 // the GPU context can be dropped on phones (backgrounding, memory pressure): pause, then resume
 let glLost = false;
-renderer.onDeviceLost = () => { glLost = true; const n = document.getElementById('glnote'); if (n) n.hidden = false; };
-canvas.addEventListener('webglcontextlost', e => { e.preventDefault(); glLost = true; const n = document.getElementById('glnote'); if (n) n.hidden = false; });
-canvas.addEventListener('webglcontextrestored', () => { glLost = false; const n = document.getElementById('glnote'); if (n) n.hidden = true; });
+// A lost WebGPU device never comes back (and three's WebGL backend doesn't rebuild its resources on a restored context): save where you are,
+// reload, and come back there (resumeSaved, at the end of loading). Three's own handler still runs (it stops rendering into the dead device).
+const _threeLost = renderer.onDeviceLost;
+const gpuLost = () => {
+  if (glLost) return; glLost = true;
+  const n = document.getElementById('glnote'); if (n){ n.textContent = 'Graphics reset by the phone · reloading where you were'; n.hidden = false; }
+  try { if (started && mode !== 'space') sessionStorage.setItem('wayResume', JSON.stringify({mode, s: shipS, th: shipTh, r: shipR, yaw, pitch, t: Date.now()})); } catch (e) {}
+  setTimeout(() => location.reload(), 1200);
+};
+renderer.onDeviceLost = info => { try { _threeLost.call(renderer, info); } catch (e) {} gpuLost(); };
+canvas.addEventListener('webglcontextlost', e => { e.preventDefault(); gpuLost(); });
 const WAYFOG = new THREE.Color(0.74, 0.87, 0.97);   // the far distance down the Way (= FLAW_AIR: the terrain fades into it, so its end never shows as a cap)
 const fogNow = WAYFOG.clone();
 renderer.setClearColor(fogNow);
@@ -1792,7 +1807,7 @@ function makeLib(qy = null){
   // this; everything else uses it only to stand in where no baked level covers a point
   const analyticBaked = (q, lod, wl, amp) => {
     const ha = terrainAt(q, lod, wl, amp, regions(q, wl)).toVar(), hh = ha.x;
-    return vec4(select(hh.greaterThanEqual(wl), amp.mul(hh.sub(wl)), tBedDepth(amp.mul(wl.sub(hh))).negate()), ha.yz.mul(amp.mul(bedSlope(amp.mul(wl.sub(hh))))), clamp(hh, -4, 64));
+    return vec4(select(hh.greaterThanEqual(wl), amp.mul(hh.sub(wl)), tBedDepth(amp.mul(wl.sub(hh))).negate()), ha.yz.mul(amp.mul(bedSlope(amp.mul(wl.sub(hh))))), clamp(hh, -4, 64));   // (the 'no data' marker is w = 99: tests use > 98 - a test at 50 threw away real heights of the flattest biomes, h up to ~57)
   };
   // THE ground for anything at q, dNoise from the camera: the baked data (the levels the pixels read there), else the analytic stand-in as that
   // level would bake it. Plants, rocks, grass, roads and water read the ground through this, so they sit on what is drawn.
@@ -1808,7 +1823,7 @@ function makeLib(qy = null){
   };
   const groundBaked = (q, dNoise, wl, amp) => {
     const r = clipFetchDist(dNoise, q.sub(CL.camU)).toVar();
-    If(r.w.greaterThan(50), () => { r.assign(analyticBaked(q, exp2(floor(clipLevel(dNoise)).add(CL.L0)), wl, amp)); });
+    If(r.w.greaterThan(98), () => { r.assign(analyticBaked(q, exp2(floor(clipLevel(dNoise)).add(CL.L0)), wl, amp)); });
     return r;
   };
   // biomes: six RGBA rows per cell (a, b = low/high palette + amp, rough; e = emissive + water line; l = liquid; x = extras; f = flora)
@@ -2601,7 +2616,7 @@ const makeAoBakeMat = (srcTex, N, rows) => {
   m.fog = false;
   const uvR = (tx, ty) => { const v = U_BROW.mul(N).add(ty).add(0.5).div(N*rows); return vec2(tx.add(0.5).div(N), CL.flip ? float(1).sub(v) : v); };
   m.fragmentNode = Fn(() => {
-    const {tBiomeAt, analyticBaked} = makeLib();
+    const {tBiomeAt, analyticBaked} = makeLib(QY);   // (precise along-axis coordinate, as the height bake: QY)
     const s = exp2(U_BK.add(CL.L0)), dkm = s.div(SUK);
     const ix = floor(uv().x.mul(N)), iy = floor(uv().y.mul(N));
     const rd = (dx, dy) => srcTex.sample(uvR(clamp(ix.add(dx), 0, N - 1), clamp(iy.add(dy), 0, N - 1))).level(0);   // height (km) and gradient at a neighbouring texel of this level (clamped to the window: the pixels never read AO within 8 texels of an edge, see clipLevel)
@@ -2636,8 +2651,8 @@ const makeAoBakeMat = (srcTex, N, rows) => {
     // (U_COVON); elsewhere A = 1, "none", and the pixels use the slope as before.
     const cov = float(1).toVar();
     If(U_COVON.greaterThan(0.5), () => {
-      const qc = U_BO.add(vec2(ix, iy).mul(s)).toVar();
-      const Bc = tBiomeAt(U.uSU.sub(qc.y).div(SUK), qc.x.div(TU).mul(TAU), true);
+      const qc = vec2(U_BO.x.add(ix.mul(s)), iy.mul(s)).toVar();   // (y: the offset in the window; QY.Y0 its origin)
+      const Bc = tBiomeAt(U.uSU.sub(qc.y.add(QY.Y0)).div(SUK), qc.x.div(TU).mul(TAU), true);
       const ampC = Bc.a.w.mul(5).toVar(), wlC = Bc.e.w.toVar(), acc = float(0).toVar();
       // (a loop, not four unrolled calls: four inlined copies of the terrain function made a shader that crashed the GPU process of a test
       // browser and was ~4x the compile on phones)
@@ -2870,7 +2885,7 @@ function makeTerrainMat(clip){
       // rings of vertices never read different levels across a hard step (a rounded level made rings that switched data, sliding with you)
       const kvf = clamp(lv.add(mk), 0, CL.NL - 1.001).toVar(), kv = floor(kvf.add(0.5)).toVar();   // (its node's level, blended into the next by the morph)
       const hT = clipFetchLevel(kvf, qr).toVar();
-      If(hT.w.greaterThan(50), () => { hT.assign(analyticBaked(q, exp2(kv.add(CL.L0)), wl, amp)); });
+      If(hT.w.greaterThan(98), () => { hT.assign(analyticBaked(q, exp2(kv.add(CL.L0)), wl, amp)); });
       const h = hT.w;
       // sea level is the 50 km floor (radius R) everywhere: land rises above it, and below the biome's water line
       // the ground eases down into a lake or sea bed (at most BED_D deep). Flattened ground (rail beds, gates,
@@ -2920,7 +2935,7 @@ function makeTerrainMat(clip){
     // (the levels' own heights only where the pages don't fully replace them: 18 fetches saved on most of the far ground in view)
     const hP = vec4(F.d).toVar();
     If(F.w.lessThan(0.999), () => { const r = clipFetchDist(dN, vQr).toVar();
-      hP.assign(select(F.w.greaterThan(0), select(r.w.greaterThan(50), F.d, mix(r, F.d, F.w)), r)); });
+      hP.assign(select(F.w.greaterThan(0), select(r.w.greaterThan(98), F.d, mix(r, F.d, F.w)), r)); });
     // REFERENCE MODE (debug builds only): the true terrain function evaluated at this pixel, at this pixel's own footprint - no bake, levels, pages
     // or mesh in between. Rendering a view with it and without it and diffing the two shows exactly what the pipeline adds (tools/pref.js).
     // U_REF 1: everywhere (the reference); 2: the exact near ground setting - within ~600 m, blended into the baked data by 800 m
@@ -2931,7 +2946,7 @@ function makeTerrainMat(clip){
     // ambient occlusion from the baked horizon pass, faded out in the far haze (its footprint there is below a pixel's worth of shape)
     const aoR = float(1).toVar(); if (CL.ao) If(F.wa.lessThan(0.999), () => { aoR.assign(clipAO(dN, vQr)); });
     const aoP = (CL.ao ? mix(pow(mix(aoR, F.ao, F.wa), 2.2), float(1), smoothstep(40, 160, length(cameraPosition.sub(vW)))) : float(1)).toVar();
-    const pxFb = hP.w.greaterThan(50);   // no baked data under this pixel: the mesh's own height and gradient
+    const pxFb = hP.w.greaterThan(98);   // no baked data under this pixel: the mesh's own height and gradient
     If(pxFb, () => { hP.assign(vec4(vR.w.sub(LIFT), 0, 0, vQH.z)); });
     const vH = hP.w.toVar();
     const dHp = select(pxFb, vR.xy, hP.yz.mul(vR.z)).toVar();
@@ -3243,7 +3258,7 @@ function makeWaterMat(){
     }
     // the depth per pixel, over the very bed the terrain draws (the vertices' depth followed the triangles and crawled as they snapped)
     const hb = clipFetchDist(dist.mul(SUK), vQw).toVar();
-    const depth = select(hb.w.greaterThan(50), vD.x, max(hb.x.negate().mul(vS.x).sub(LIFT), 0)).toVar();
+    const depth = select(hb.w.greaterThan(98), vD.x, max(hb.x.negate().mul(vS.x).sub(LIFT), 0)).toVar();
     const w4 = waterLook(vL, depth, V, n, up, L, dist);
     const col = vec3(w4.col).toVar();
     if (RIPPLES) col.addAssign(vec3(1.0, 0.94, 0.82).mul(pow(max(dot(reflect(V.negate(), n), L), 0), 60).mul(near.mul(1.2))));   // sharp glints of the tubelight on the ripples, close up only
@@ -5636,7 +5651,7 @@ function makeFloraLattice(cfg){
         const th = atan(root.y, root.x).toVar(), qr = vec2(th.div(TAU).mul(TU), U.uSU.sub(root.z.mul(SUK))).sub(CL.camU).toVar();
         qr.x.subAssign(floor(qr.x.div(TU).add(0.5)).mul(TU));   // (the ring's wrap)
         const g = clipFetchDist(length(qr), qr).toVar();
-        If(g.w.lessThan(50), () => {
+        If(g.w.lessThan(98), () => {
           const H = g.x.mul(gateFade(th, root.z).mul(trackFade(th, root.z))).add(LIFT);
           rootB.element(instanceIndex).assign(vec4(radAt(th).xy.mul(float(R).sub(H).add(0.0003)), R4.z, R4.w));
           A4.w.assign(d);
@@ -6285,7 +6300,8 @@ const WAY_JUMPS = [[600, 0.5], [4816, 4.2], [5116, 1.05], [6112, 1.05], [6616, 0
 function jumpTo(s, th){
   pending = null; auto = null; spaceAuto = null; throttle = 0; v = 0;
   shipS = s; shipTh = th; yaw = yawTarget = 0.3; pitch = 0.05; pitchEase = null;
-  mode = 'walk'; shipR = R - groundAt(s, th).H - EYE;
+  mode = 'walk'; syncWorld(); shipR = R - groundAt(s, th).H - EYE;   // (syncWorld first: the biome window must be at s, or the height came from its far edge)
+  for (const c of CL.cpu.keys()) CL.cpu[c] = null; for (const o of CL.forg) o.set(1e9, 1e9);   // (no read-back or page from the old place: the wraps can alias a jump onto it)
   clipRebakeHere();   // every level baked around you now, before the next frame draws (else that frame is drawn from the slow analytic fallback)
   setModeUI(); msg('On the Way · ' + fmtKm(s));
 }
@@ -7133,8 +7149,18 @@ let compiling = false;
 // compute pipelines go the same way (compileComputeAsync per node) at the same time. Progress = calls finished / calls issued.
 const goBtn = $('go'), setLoad = f => goBtn.style.setProperty('--p', Math.round(Math.min(1, f)*100) + '%');
 let loadDone = false;
-const loadReady = () => { if (loadDone) return; loadDone = true; setLoad(1); goBtn.disabled = false; goBtn.textContent = 'Board the flawship'; };
-setTimeout(loadReady, 90000);   // (whatever happens, never keep the player out)
+const loadReady = () => { if (loadDone) return; loadDone = true; setLoad(1); goBtn.disabled = false; goBtn.textContent = 'Board the flawship'; resumeSaved(); };
+// back where you were after a graphics reset (gpuLost): boards straight away and puts you there (within 10 minutes of the reset)
+function resumeSaved(){
+  let r = null; try { r = JSON.parse(sessionStorage.getItem('wayResume') || 'null'); sessionStorage.removeItem('wayResume'); } catch (e) {}
+  if (!r || !(Date.now() - r.t < 600000) || !isFinite(r.s)) return;
+  goBtn.click();
+  pending = null; auto = null; throttle = 0; v = 0; shipS = r.s; shipTh = r.th; yaw = yawTarget = r.yaw; pitch = r.pitch;
+  mode = r.mode === 'walk' || r.mode === 'free' || r.mode === 'flaw' ? r.mode : 'walk';
+  syncWorld(); shipR = mode === 'walk' ? R - groundAt(r.s, r.th).H - EYE : r.r;
+  clipRebakeHere(); setModeUI(); msg('Resumed after a graphics reset');
+}
+setTimeout(() => { compiling = false; loadReady(); }, 90000);   // (whatever happens, never keep the player out - nor the inside dark: the gate opens too)
 const nextFrame = () => new Promise(r => requestAnimationFrame(() => r()));
 // each pipeline's own compile time is recorded (request to ready), and the slowest are shown under the button when it's done (tap)
 const LOAD = {t0: 0, rec: []};   // (t0: the page opening)
@@ -7206,8 +7232,9 @@ setTimeout(async () => {
     compiling = false;
     setLoad(0.95); goBtn.textContent = 'Preparing the world 100%'; await nextFrame();
     // then upload every interior buffer and texture with a one-pixel draw at the end of the next frame (inside the
-    // frame, so it lands on that frame's canvas image), so first entry doesn't stall on uploads
-    afterFrame = () => {
+    // frame, so it lands on that frame's canvas image), so first entry doesn't stall on uploads. (Not once you've boarded - the watchdog let
+    // you in early: it flips the whole scene to its inside state for that frame, a visible glitch in the middle of play.)
+    if (!started) afterFrame = () => {
       vis[0] = interior.visible; vis[1] = exterior.visible; vis[2] = sky.visible; vis[3] = jeepRig.visible; mask = camera.layers.mask;
       try {
         insideState();
