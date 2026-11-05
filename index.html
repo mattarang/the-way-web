@@ -372,6 +372,9 @@ const NBW = NBT + 8;           // texture columns: 256 Way cells + chamber biome
 // by a detail noise. Grass blades grow right up to the earth edge, bushes to it, trees a little short of it (no bald painted-grass band).
 const SLOPE = {dirt: 0.50, rock: 0.53, w: 0.12};
 const sin2tan = x => x/Math.sqrt(1 - x*x);
+// the soil's slope-limit shift (sin) for groundTopo's wetness w (0 crest .. 0.5 neutral .. 1 hollow), and the plants' limit as a tangent
+const soilShift = w => w.sub(0.5).mul(0.24);
+const plantTan = (sin0, w) => { const sl = clamp(soilShift(w).mul(UBER ? 1 : 0).add(sin0), 0.05, 0.95); return sl.div(sqrt(sl.mul(sl).oneMinus())); };
 const SLOPE_DIRT = [SLOPE.dirt - SLOPE.w/2, SLOPE.dirt + SLOPE.w/2];   // the earth edge's ramp (sin)
 const SLOPE_GRASS_TAN = sin2tan(SLOPE.dirt), SLOPE_BUSH_TAN = sin2tan(SLOPE.dirt), SLOPE_TREE_TAN = sin2tan(SLOPE.dirt - 0.03);   // tan of the steepest ground: grass and bushes 30 deg, trees 28
 const ORD = ['First','Second','Third','Fourth','Fifth','Sixth','Seventh'];
@@ -647,7 +650,7 @@ const UB = {L0: 16, N: 4, warpL: 32, k0: 0.045, m0: 0.2328, zN: 0.127, mtn0: 0.3
   expMu: 1.0001, warp2: 0, rel0: 0.55, relA: 1.0,
   // EROSION FILTER over the smooth base (N = 4 octaves: 16 .. 2 km): cells EC0 noise units (~0.98 km) halving over EN octaves (to ~61 m; every cell
   // divides TU and SPER: no seams), gully depth ES x 481.5 m at the first octave (lab: ~0.1 of the cell), ridge / crease rounding ERR / ERC
-  fillEro: false, EFD: 0.1, EC0: 1, EN: 5, ES: 0.13, ERR: 0.9, ERC: 0.2, EGW: 0.8};   // (lab: softer than Rune's pointy 0.22/0.5 - no aliased blades)   // EXPONENTIALLY DISTRIBUTED gradients (Parberry 2015, JCGT 4(2): real terrain's gradients are exponentially distributed at every scale;
+  fillEro: false, EFD: 0.1, EC0: 1, EN: 5, ES: 0.11, ERR: 0.9, ERC: 0.2, EGW: 0.8};   // (lab: softer than Rune's pointy 0.22/0.5 - no aliased blades)   // EXPONENTIALLY DISTRIBUTED gradients (Parberry 2015, JCGT 4(2): real terrain's gradients are exponentially distributed at every scale;
                   // cited by Sean Murray as shaping No Man's Sky's generator): each lattice point's gradient scaled by mu^-k, k a hash 0..255 (his
                   // magnitude table, mu = 1.02 as in his code), normalized to unit RMS - mostly gentle ground, now and then a steep feature
 UB.expN = 1/Math.sqrt((1 - Math.pow(UB.expMu, -512))/(256*(1 - Math.pow(UB.expMu, -2))));   // (1 / RMS of mu^-k over k = 0..255)
@@ -740,14 +743,16 @@ function uberEro(qx, qy, gx, gy, fade, strength, lod){
     }
     let ix = pdx/Math.max(ws, 1e-6), iy = pdy/Math.max(ws, 1e-6); const il = Math.max(Math.hypot(ix, iy), 0.5); ix /= il; iy /= il;
     const Cm = C*KM, dzx = -sx/Cm, dzy = -sy/Cm, sloping = Math.abs(iy);
-    const sg = iy > 0 ? 1 : iy < 0 ? -1 : 0, k = Math.pow(0.5, o)*481.5*0.5;
+    // (the straight-gully steering: the reference's sign(), made continuous over a band that widens with the sample spacing - sign() flips on
+    // every crest and gully line, a discontinuity each level sampled into its own jagged teeth)
+    const sw = Math.max(0.25, lod*8/C), sg = Math.max(-1, Math.min(1, iy/sw)), k = Math.pow(0.5, o)*481.5*0.5;
     gsx += dzx*sg*k; gsy += dzy*sg*k;
     const gd = (vnoise(qx/(C*2) + salt*0.013, qy/(C*2) + salt*0.013, TU/(C*2), SPER/(C*2))*2 - 1)*0.6 + 1;
     const gulH = ix*gd, gulX = dzx*iy*gd, gulY = dzy*iy*gd;
-    const vis = lod > 0 ? smooth(lod*2, lod*4, C) : 1, mv = mask*vis;   // (octaves finer than ~2-4 samples fade to the target)
+    const vis = lod > 0 ? smooth(lod*3, lod*6, C) : 1, mv = mask*vis;   // (octaves finer than ~2-4 samples fade to the target)
     const fH = fade + (gulH*UB.EGW - fade)*mv, fX = gulX*UB.EGW*mv, fY = gulY*UB.EGW*mv;
     hE += fH*A; gEx += fX*A; gEy += fY*A; fade = fH;
-    const nm = easeOut(smoothStart(sloping*1.25, (UB.ERC + (UB.ERR - UB.ERC)*Math.max(0, Math.min(1, ix + 0.5)))*rmult*1.25));
+    const nm = easeOut(smoothStart(sloping*1.25, Math.max((UB.ERC + (UB.ERR - UB.ERC)*Math.max(0, Math.min(1, ix + 0.5)))*rmult, lod*6/C)*1.25));   // (crests at least ~2 samples round)
     mask = powInv(mask, 1.5)*nm;
     rfade += (gulH - rfade)*rmask; rmask *= easeOut(sloping*1.5);
     A *= 0.5; C *= 0.5; rmult *= 2;
@@ -2029,7 +2034,7 @@ function makeLib(qy = null){
     const rmask = easeOut(sl.mul(2.8)).toVar(), rfade = float(fade0).toVar();   // (the ridge map: see uberEro)
     const gs = g.div(sl).mul(0.7).toVar(), hE = float(0).toVar(), A = strength.mul(481.5/UB.EGW).toVar(), C = float(UB.EC0).toVar(), rmult = float(1).toVar();
     Loop({start: 0, end: UB.EN, type: 'int', name: 'eroO'}, ({eroO}) => {
-     If(select(lod.greaterThan(0), C.greaterThan(lod.mul(2)), true), () => {   // (octaves under two samples contribute nothing: skipped, not computed and faded)
+     If(select(lod.greaterThan(0), C.greaterThan(lod.mul(3)), true), () => {   // (octaves under two samples contribute nothing: skipped, not computed and faded)
       const salt = float(eroO).mul(977).add(4801).toVar();
       const dir = normalize(gs.add(vec2(1e-9, 0))).toVar(), side = vec2(dir.y.negate(), dir.x).mul(0.7*6.2831853).toVar();
       const pp = q.div(C).toVar(), ci = floor(pp).toVar(), pf = pp.sub(ci).toVar(), nx = float(TU).div(C), ny = float(SPER).div(C);
@@ -2046,12 +2051,12 @@ function makeLib(qy = null){
       });
       const ip0 = pd.div(max(ws, 1e-6)), ip = ip0.div(max(length(ip0), 0.5)).toVar();
       const dzw = side.div(C.mul(KM)).negate().toVar(), sloping = abs(ip.y);
-      gs.addAssign(dzw.mul(sign(ip.y)).mul(pow(float(0.5), float(eroO)).mul(481.5*0.5)));
+      gs.addAssign(dzw.mul(clamp(ip.y.div(max(float(0.25), lod.mul(8).div(C))), -1, 1)).mul(pow(float(0.5), float(eroO)).mul(481.5*0.5)));   // (continuous steering: see uberEro)
       const gd = tVnoise(q.div(C.mul(2)).add(salt.mul(0.013)), vec2(TU, SPER).div(C.mul(2))).mul(2).sub(1).mul(0.6).add(1);
-      const vis = select(lod.greaterThan(0), smoothstep(lod.mul(2), lod.mul(4), C), float(1));
+      const vis = select(lod.greaterThan(0), smoothstep(lod.mul(3), lod.mul(6), C), float(1));
       const fH = mix(fade, ip.x.mul(gd).mul(UB.EGW), mask.mul(vis));
       hE.addAssign(fH.mul(A)); fade.assign(fH);
-      const nm = easeOut(smoothStart(sloping.mul(1.25), mix(float(UB.ERC), float(UB.ERR), clamp(ip.x.add(0.5), 0, 1)).mul(rmult).mul(1.25)));
+      const nm = easeOut(smoothStart(sloping.mul(1.25), max(mix(float(UB.ERC), float(UB.ERR), clamp(ip.x.add(0.5), 0, 1)).mul(rmult), lod.mul(6).div(C)).mul(1.25)));   // (crests at least ~2 samples round)
       mask.assign(powInv(mask, 1.5).mul(nm));
       rfade.assign(mix(rfade, ip.x.mul(gd), rmask)); rmask.mulAssign(easeOut(sloping.mul(1.5)));
      });
@@ -2269,9 +2274,13 @@ function makeLib(qy = null){
     // crawled), and the edge widens to at least the slope's change across a pixel (no sparkle).
     const ew = (px ? max(float(0.12), fwidth(sj).mul(2)) : float(0.12)).toVar();
     const dW = float(0).toVar();
-    If(sj.greaterThan(SLOPE.dirt - SLOPE.w), () => {
+    // SOIL ON THE LANDFORM (the eroded terrain): soil-mantled hollows hold colluvium on steeper ground, convex spurs and crests shed it to bare
+    // rock (Dietrich & Dunne 1978; Heimsath et al. 1997: soil thickens with convergence, thins with convexity). The wetness (groundTopo: the
+    // erosion's ridge map and the ground's relief) moves every slope limit - earth, rock, the plants' - by up to +-0.12 in sin (~+-8 deg)
+    const sSh = (UBER ? soilShift(topo ?? float(0.5)) : float(0)).toVar();
+    If(sj.greaterThan(sSh.add(SLOPE.dirt - SLOPE.w)), () => {
       const nbA = vnP(16, 11).sub(0.5).mul(keepF(16));
-      dW.assign(smoothstep(0.43, 0.57, sj.sub(SLOPE.dirt).div(ew).add(0.5).add(nbA.mul(0.5))));
+      dW.assign(smoothstep(0.43, 0.57, sj.sub(sSh).sub(SLOPE.dirt).div(ew).add(0.5).add(nbA.mul(0.5))));
       // (in patches ~40 m across, so a cliff's foot is not ringed by an even earth stroke: review round 1, 'sticker outline')
       dW.mulAssign(smoothstep(0.35, 0.6, vnP(24, 77)));
     });
@@ -2289,16 +2298,21 @@ function makeLib(qy = null){
     // where sin < SLOPE.rock - 0.05: the work is skipped there.)
     const rkM = float(0).toVar(), rockC = vec3(0).toVar();
     const hasCov = cov ? cov.greaterThanEqual(0) : null;
-    If(cov ? sj.greaterThan(SLOPE.rock - 0.05).or(cov.greaterThan(0.25)) : sj.greaterThan(SLOPE.rock - 0.05), () => {
+    If(cov ? sj.sub(sSh).greaterThan(SLOPE.rock - 0.05).or(cov.greaterThan(0.25)) : sj.sub(sSh).greaterThan(SLOPE.rock - 0.05), () => {
+      const nbB = vnP(23, 31).sub(0.5).mul(keepF(23));
+      if (UBER){   // (the eroded terrain: the soil shift above, no crag field)
+        rkM.assign(smoothstep(0.43, 0.57, sj.sub(sSh).sub(SLOPE.rock).div(ew).add(0.5).add(nbB.mul(0.35))));
+        if (cov) If(hasCov, () => { rkM.assign(smoothstep(0.43, 0.57, cov.add(nbB.mul(0.18)).sub(sSh.mul(4)))); });
+      } else {
       const Lw = LF.cragWL, W = LF.cragW, Lk = LF.cragL[1];
       const wa = tPnoiseD(vec2(q.x.div(Lw).add(3.7), q.y.mod(256*Lw).div(Lw).add(8.1)), TU/Lw, tw(q)).x, wb = tPnoiseD(vec2(q.x.div(Lw).add(41.3), q.y.mod(256*Lw).div(Lw).add(2.9)), TU/Lw, tw(q)).x;
       const wq = q.add(vec2(wa, wb).mul(W));
       const cn = tPnoiseD(vec2(wq.x.div(Lk).add(26.3), wq.y.mod(256*Lk).div(Lk).add(5.1)), TU/Lk, tw(q)).x;
       const rkS = clamp(float(1).sub(abs(cn).mul(1.5)), 0, 1).oneMinus().mul(0.1);
-      const nbB = vnP(23, 31).sub(0.5).mul(keepF(23));
       rkM.assign(smoothstep(0.43, 0.57, sj.sub(rkS).sub(SLOPE.rock).div(ew).add(0.5).add(nbB.mul(0.35))));
       // with baked coverage: a crisp edge at 50% of the texel's area being rock, keeping the same wobble and crest bias (scaled into coverage)
       if (cov) If(hasCov, () => { rkM.assign(smoothstep(0.43, 0.57, cov.add(nbB.mul(0.18)).sub(rkS.mul(4)))); });
+      }
       const n1 = tVnoise(q.mul(3).add(5), vec2(TU*3, SPER*3));
       rockC.assign(mix(vec3(0.80, 0.80, 0.79), vec3(0.88, 0.83, 0.74), smoothstep(0.25, 0.75, n1)).mul(B.s.rgb));   // cool blue-grey to warm cream, in the biome's stone tint
     });
@@ -3319,8 +3333,8 @@ function makeTerrainMat(clip){
     // own colour test), slopes they stand on, above the water.
     {
       const gr = smoothstep(1.0, 1.08, col.g.div(max(col.r, 1e-3))).mul(smoothstep(1.05, 1.15, col.g.div(max(col.b, 1e-3))));
-      const cMax = 1 - 1/Math.sqrt(1 + SLOPE_TREE_TAN*SLOPE_TREE_TAN);   // (the trees' slope limit as 1 - cos)
-      const fc = vF.x.mul(gr).mul(smoothstep(cMax + 0.02, cMax - 0.02, slope)).mul(select(vH.greaterThanEqual(wl.add(0.006)), float(1), float(0))).toVar();
+      const tT = plantTan(SLOPE.dirt - 0.03, vF.y), cMax = float(1).sub(float(1).div(sqrt(tT.mul(tT).add(1)))).toVar();   // (the trees' slope limit as 1 - cos, moved with the landform as theirs)
+      const fc = vF.x.mul(gr).mul(smoothstep(cMax.add(0.02), cMax.sub(0.02), slope)).mul(select(vH.greaterThanEqual(wl.add(0.006)), float(1), float(0))).toVar();
       If(fc.greaterThan(0.001), () => {
         const con = clamp(B.f.y.add(smoothstep(0.3, 1.2, hP.x).mul(0.5)), 0, 1);
         const canopy = tStylize(B.a.rgb).mul(mix(vec3(0.9, 1.02, 0.76), vec3(0.66, 0.84, 0.76), con)).mul(0.86);
@@ -5319,7 +5333,8 @@ function makeGrassRing(cfg){
     const RT = T.mul(float(R).sub(H).mul(TAU/TU)).toVar(), AY = vec3(0, 0, -1/SUK);
     const exN = ex => { const nn = normalize(cross(up.mul(dH.x.mul(ex)).add(RT), up.mul(dH.y.mul(ex)).add(AY))).toVar(); If(dot(nn, up).lessThan(0), () => { nn.assign(nn.negate()); }); return nn; };
     const n = exN(1), slope = clamp(dot(n, up), 0, 1).oneMinus().toVar();
-    const s = surface(B, hT.w, hT.x.mul(fd), q, float(0.002), slope, sectorOf(th), true, false, null, null, mix(float(0.5), groundTopo(qr, hT.x), fd));   // (the terrain's lushness: the same wetness)
+    const wetG = mix(float(0.5), groundTopo(qr, hT.x), fd).toVar();
+    const s = surface(B, hT.w, hT.x.mul(fd), q, float(0.002), slope, sectorOf(th), true, false, null, null, wetG);   // (the terrain's lushness: the same wetness)
     const col = railBed(s.col, th, z).toVar();
     // grass only where the ground shown is grass (its actual colour is green: not the dirt, rock, sand or dry patches
     // the terrain paints over a green biome), dry, gentle, no rails, paving, roads or streets
@@ -5330,7 +5345,7 @@ function makeGrassRing(cfg){
     const straw = col.r.greaterThanEqual(col.g).and(col.g.greaterThan(col.b.mul(1.25))).and(cmG.wSand.lessThan(0.3)).and(cmG.wReg.lessThan(0.3)).and(s.rk.lessThan(0.3));
     const ok = green.or(straw).and(hT.w.greaterThanEqual(wl)).and(H.greaterThan(0.02))
       .and(B.x.x.lessThan(0.3)).and(U.uSs.sub(z).lessThan(0).and(tTrackDist(th).lessThan(0.15)).not())
-      .and(length(dH).mul(SUK).lessThan(SLOPE_GRASS_TAN))
+      .and(length(dH).mul(SUK).lessThan(plantTan(SLOPE.dirt, wetG)))   // (the soil's limit moves with the landform: see surface)
       .and(abs(roadNode(z, th).x).greaterThan(ROAD.FULL + 0.4)).and(cityStreetNode(z, th).greaterThan(CITY_HALF + 0.0045));
     const rr = float(R).sub(H).add(0.00012);   // roots just below the surface
     rootB.element(sid).assign(vec4(radAt(th).xy.mul(rr), sa.negate(), select(ok, hash01(r2).mul(0.4).add(0.85).mul(u.sz), float(0))));
@@ -5954,7 +5969,7 @@ function makeFloraLattice(cfg){
       const clearR = cfg.bush ? 7 : 10;   // m from a road's centre line that stays clear of plants
       const ok = hash01(r2).lessThan(dens).and(abs(roadNode(z, th).x).greaterThan(clearR)).and(cityStreetNode(z, th).greaterThan(CITY_HALF + 0.012)).and(hT.w.greaterThan(wl.add(0.006))).and(H.greaterThan(0.022)).and(fd.greaterThan(0.95))
         .and(B.x.x.lessThan(0.3)).and(U.uSs.sub(z).lessThan(0).and(tTrackDist(th).lessThan(0.25)).not())
-        .and(length(hT.yz).mul(SUK).lessThan(cfg.bush ? SLOPE_BUSH_TAN : SLOPE_TREE_TAN));
+        .and(length(hT.yz).mul(SUK).lessThan(plantTan(cfg.bush ? SLOPE.dirt : SLOPE.dirt - 0.03, wet)));   // (the soil's limit moves with the landform: see surface)
       // species: conifers by the biome's share, more of them up high
       const conifer = cfg.bush ? float(0) : select(hash01(r3).lessThan(B.f.y.add(smoothstep(0.3, 1.2, H).mul(0.5))), float(1), float(0));
       const size = hash01(r4).mul(0.5).add(0.75).mul(B.f.w.mul(2)).toVar();
