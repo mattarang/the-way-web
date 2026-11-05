@@ -647,7 +647,7 @@ const UB = {L0: 16, N: 4, warpL: 32, k0: 0.045, m0: 0.2328, zN: 0.127, mtn0: 0.3
   expMu: 1.0001, warp2: 0, rel0: 0.55, relA: 1.0,
   // EROSION FILTER over the smooth base (N = 4 octaves: 16 .. 2 km): cells EC0 noise units (~0.98 km) halving over EN octaves (to ~61 m; every cell
   // divides TU and SPER: no seams), gully depth ES x 481.5 m at the first octave (lab: ~0.1 of the cell), ridge / crease rounding ERR / ERC
-  fillEro: false, EFD: 0.01, EC0: 1, EN: 5, ES: 0.13, ERR: 0.9, ERC: 0.2, EGW: 0.8};   // (lab: softer than Rune's pointy 0.22/0.5 - no aliased blades)   // EXPONENTIALLY DISTRIBUTED gradients (Parberry 2015, JCGT 4(2): real terrain's gradients are exponentially distributed at every scale;
+  fillEro: false, EFD: 0.1, EC0: 1, EN: 5, ES: 0.13, ERR: 0.9, ERC: 0.2, EGW: 0.8};   // (lab: softer than Rune's pointy 0.22/0.5 - no aliased blades)   // EXPONENTIALLY DISTRIBUTED gradients (Parberry 2015, JCGT 4(2): real terrain's gradients are exponentially distributed at every scale;
                   // cited by Sean Murray as shaping No Man's Sky's generator): each lattice point's gradient scaled by mu^-k, k a hash 0..255 (his
                   // magnitude table, mu = 1.02 as in his code), normalized to unit RMS - mostly gentle ground, now and then a steep feature
 UB.expN = 1/Math.sqrt((1 - Math.pow(UB.expMu, -512))/(256*(1 - Math.pow(UB.expMu, -2))));   // (1 / RMS of mu^-k over k = 0..255)
@@ -763,7 +763,11 @@ function uberH(qx, qy, wl = 0, amp = 1, dl = null, lod = 0){
   if (!(UB.ES > 0) || h0 <= wl || !UB.fillEro) return h0;   // (the CPU copy is the fast fill: no erosion - the truth is the bake, see CL.NC)
   // (the base slope - the gullies' steering - over ONE fixed step, UB.EFD, on CPU and GPU alike: the gully pattern is sensitive to its direction,
   // and a step that followed each side's sample spacing put CPU and GPU metres apart)
-  const E = UB.EFD, gx = (uberBase(qx + E, qy, wl, amp, dl, lod)[0] - h0)/E*amp*SUK, gy = (uberBase(qx, qy + E, wl, amp, dl, lod)[0] - h0)/E*amp*SUK;   // (m/m)
+  // (central differences over 2*EFD = 200 m: the float32 heights carry ~2 cm of rounding, and over the old 10 m forward step that was ~0.3 deg of
+  // steering jitter per texel - which the filter amplified into metre-high per-texel spikes that changed with every re-bake. The base's finest
+  // octave is 2 km, so the wider step is still its true slope)
+  const E = UB.EFD, B = (x, y) => uberBase(x, y, wl, amp, dl, lod)[0];
+  const gx = (B(qx + E, qy) - B(qx - E, qy))/(2*E)*amp*SUK, gy = (B(qx, qy + E) - B(qx, qy - E))/(2*E)*amp*SUK;   // (m/m)
   const fade = Math.max(-1, Math.min(1, U/UB.zN/1.5)), str = smooth(0, 0.08, h0 - wl)*UB.ES;
   return h0 + uberEro(qx, qy, gx, gy, fade, str, lod)[0]/(amp*1000);
 }
@@ -2062,11 +2066,12 @@ function makeLib(qy = null){
     const e = max(lod.mul(0.5), 2e-4).toVar();
     const U0 = tUberN(q, lod, sharp, ero, gainK, warpA).toVar();
     const H = U => tUberShape(U, wl, amp, m, dl.z, rel);
-    const b0 = H(U0).toVar(), bx = H(tUberN(q.add(vec2(e, 0)), lod, sharp, ero, gainK, warpA)).toVar(), by = H(tUberN(q.add(vec2(0, e)), lod, sharp, ero, gainK, warpA)).toVar();
-    const out = vec3(b0, bx.sub(b0).div(e), by.sub(b0).div(e)).toVar();
+    const b0 = H(U0).toVar(), Hq = d => H(tUberN(q.add(d), lod, sharp, ero, gainK, warpA));
+    const bx = hOnly ? b0 : Hq(vec2(e, 0)).toVar(), by = hOnly ? b0 : Hq(vec2(0, e)).toVar();   // (the bake skips these: the slope pass)
+    const out = (hOnly ? vec3(b0, 0, 0) : vec3(b0, bx.sub(b0).div(e), by.sub(b0).div(e))).toVar();
     if (UB.ES > 0) If(b0.greaterThan(wl), () => {
-      const E = UB.EFD, bxE = H(tUberN(q.add(vec2(E, 0)), lod, sharp, ero, gainK, warpA)), byE = H(tUberN(q.add(vec2(0, E)), lod, sharp, ero, gainK, warpA));
-      const g = vec2(bxE.sub(b0), byE.sub(b0)).div(E).mul(amp).mul(SUK).toVar(), fade = clamp(U0.div(UB.zN*1.5), -1, 1).toVar(), str = smoothstep(0, 0.08, b0.sub(wl)).mul(UB.ES).toVar(), k = amp.mul(1000);
+      const E = UB.EFD;   // (central differences over 2*EFD: see uberH)
+      const g = vec2(Hq(vec2(E, 0)).sub(Hq(vec2(-E, 0))), Hq(vec2(0, E)).sub(Hq(vec2(0, -E)))).div(2*E).mul(amp).mul(SUK).toVar(), fade = clamp(U0.div(UB.zN*1.5), -1, 1).toVar(), str = smoothstep(0, 0.08, b0.sub(wl)).mul(UB.ES).toVar(), k = amp.mul(1000);
       const qe = vec2(q.x, ym(q.y, SPER)).toVar();   // (the absolute along-axis coordinate, wrapped at SPER: the bake's q.y is an offset in its window)
       const e0 = tUberEro(qe, g, fade, str, lod).x.div(k).toVar();
       if (hOnly) out.assign(vec3(b0.add(e0), 0, 0));   // (the bake: the slope comes from the neighbouring baked heights, clipSlopeMat)
