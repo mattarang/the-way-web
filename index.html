@@ -1260,6 +1260,9 @@ let perf = null, perfOn = false;   // performance monitor (see setPerf)
 const perfPanels = {};
 const canvas = document.getElementById('c');
 const isPhone = matchMedia('(pointer: coarse)').matches;
+// TERRAIN LAB (?lab=1): terrain, water and their materials only - no grass, trees, rocks, clouds, flaw glow or shadow maps - so the terrain can be
+// investigated in a headless browser (far fewer pipelines to compile, far less to draw). Normal play never sets it.
+const LAB = /[?&]lab\b/.test(location.search);
 // MSAA on a 2x-3x phone screen costs a lot for little gain
 // MSAA 4x on phones too (Debug can turn it off; it reloads): Apple's tile GPUs resolve it on chip, and at the phone's 1.25-1.5x pixel ratio (of a
 // 3x screen) the grass blades and tree edges were a field of jaggies without it
@@ -1415,7 +1418,16 @@ const sstep01 = t => t.mul(t).mul(t.mul(-2).add(3));
 // The library is built afresh for each shader stage of each material (makeLib()): three r186 emits a shader
 // function once per builder, so one shared function that reads a uniform or texture would be missing its
 // bindings in every other stage or material that calls it.
-function makeLib(){
+// PRECISE ALONG-AXIS COORDINATE for the bakes (makeLib(QY)): the noise coordinate along the Way runs to SPER (8192 units) and float32 resolves it
+// only to ~0.5 m out there (4 million km down the Way: q.y ~ 6300) - the baked terrain was sampled on a 0.5 m staircase, terrace risers drew
+// as rows of teeth, and as the windows moved the staircase moved with them (flicker). In a bake, q.y is the texel's small offset inside its
+// window and the window's origin Y0 is kept exact on the CPU (double), reduced there by every period the terrain wraps at (QY.mods): each
+// wrap (q.y mod P) becomes ((Y0 mod P) + y) mod P, exact. Everything else (pixels, vertices) keeps the plain coordinate (QY null).
+const QY = {Y0: uniform(0), mods: new Map(), mod(P){ if (!this.mods.has(P)) this.mods.set(P, uniform(((this.Y0.value % P) + P) % P)); return this.mods.get(P); },
+  set(Y0){ this.Y0.value = Y0; for (const [P, u] of this.mods) u.value = ((Y0 % P) + P) % P; }};
+function makeLib(qy = null){
+  // along-axis wrap and absolute value of a noise coordinate's y (see QY)
+  const ym = (y, P) => qy ? y.add(qy.mod(P)).mod(P) : y.mod(P), yAbs = y => qy ? y.add(qy.Y0) : y;
   // lake and sea bed depth (km) for x km of the height function's drop below the water line; and its slope factor
   const tBedDepth = x => exp(max(x, 0).div(-BED_D)).oneMinus().mul(BED_D);
   const bedSlope = x => select(x.greaterThan(0), exp(x.div(-BED_D)), float(1));
@@ -1481,7 +1493,7 @@ function makeLib(){
   // terrain height (mirrors terrainH() in JS): three.js's terrain example, ImprovedNoise from a baked corner table
   const perlinN = texture(perlinTex);
   // the noise's layers (see DWU): corners of a cell blended between this layer's table window and the next one's
-  const tw = q => max(U.uWB.add(q.y.div(DWU)), 0);
+  const tw = q => max(U.uWB.add(yAbs(q.y).div(DWU)), 0);
   const tShX = k => k.mul(113).add(floor(k.div(256)).mul(71)).mod(256), tShY = k => k.mul(61).add(floor(k.div(256)).mul(29)).mod(256);
   const corners4 = (X0, X1, Y0, Y1, w) => {
     if (!LAYERS) return [[X0, Y0], [X1, Y0], [X0, Y1], [X1, Y1]].map(([X, Y]) => perlinN.load(ivec2(int(X), int(Y))).rgb.mul(2).sub(1).toVar());   // ?layers=0: the single table (for timing the layers)
@@ -1518,20 +1530,20 @@ function makeLib(){
     const r = vec3(0).toVar();
     If(wl.greaterThan(0.002), () => {
       const L = WB_L, W = WB_W, k = WB_UP + WB_DN;
-      const n1 = tPnoiseD(vec2(q.x.div(L).add(3.1), q.y.mod(256*L).div(L).add(1.7)), TU/L, tw(q)).toVar();
-      const n2 = tPnoiseD(vec2(q.x.div(L*0.5).add(5.3), q.y.mod(128*L).div(L*0.5).add(2.9)), 2*TU/L, tw(q)).toVar();
+      const n1 = tPnoiseD(vec2(q.x.div(L).add(3.1), ym(q.y, 256*L).div(L).add(1.7)), TU/L, tw(q)).toVar();
+      const n2 = tPnoiseD(vec2(q.x.div(L*0.5).add(5.3), ym(q.y, 128*L).div(L*0.5).add(2.9)), 2*TU/L, tw(q)).toVar();
       const B = n1.x.add(n2.x.mul(0.5)), dB = n1.yz.div(L).add(n2.yz.mul(0.5/(L*0.5)));
       const x = clamp(B.sub(wl.mul(0.5).sub(0.3).add(W)).div(-2*W), 0, 1).toVar();
       r.assign(vec3(sstep01(x).mul(-k).add(WB_UP), dB.mul(x.mul(6).mul(x.oneMinus()).div(-2*W).mul(-k))).mul(smoothstep(0.002, 0.006, wl)));   // (eased in with the water line, as in JS)
     });
     return r;
   });
-  const lfReg = (q, ox, oy) => { const r = tPnoiseD(vec2(q.x.div(32).add(ox), q.y.mod(256*32).div(32).add(oy)), 5, tw(q)).toVar(); return vec3(r.x, r.yz.div(32)); };
+  const lfReg = (q, ox, oy) => { const r = tPnoiseD(vec2(q.x.div(32).add(ox), ym(q.y, 256*32).div(32).add(oy)), 5, tw(q)).toVar(); return vec3(r.x, r.yz.div(32)); };
   // the landform dials at q (warp, gain, mesa, ridge): row 7 of the Way's biome texture; neutral in the Stone and with ?dials=0
   const tDials = q => {
     const d = vec4(0, 1, 0, 0).toVar();
     if (DIALS) {
-      const sw = U.uSs.sub(U.uSU.sub(q.y).div(SUK));
+      const sw = U.uSs.sub(U.uSU.sub(yAbs(q.y)).div(SUK));
       If(sw.greaterThanEqual(0), () => {
         const u = sw.div(WAY.DS).sub(U.uWayB).div(WAY.W), t = fract(q.x.div(TU)).mul(WAY.K);
         d.assign(wayRead(u, t, 7, true));   // (exact: the dials shape the ground)
@@ -1541,7 +1553,7 @@ function makeLib(){
   };
   const regions = (q, wl) => ({
     dl: tDials(q),
-    mn: tPnoiseD(vec2(q.x.div(LOW_L), q.y.mod(256*LOW_L).div(LOW_L)), TU/LOW_L, tw(q)).toVar(),
+    mn: tPnoiseD(vec2(q.x.div(LOW_L), ym(q.y, 256*LOW_L).div(LOW_L)), TU/LOW_L, tw(q)).toVar(),
     rA: lfReg(q, 11.3, 4.1).toVar(), rB: lfReg(q, 19.7, 8.3).toVar(), bas: tBasin(q, wl).toVar(),
   });
   // landforms (mirrors landforms() in JS): valleys, mounds and terraced steppes, with their slopes
@@ -1580,7 +1592,7 @@ function makeLib(){
     const anyVS = wV.x.greaterThan(0).or(wS.x.greaterThan(0));
     If(anyVS.or(wM.x.greaterThan(0)), () => {
       const nv = vec3(0).toVar();
-      If(anyVS.and(vKeep.greaterThan(0).or(tKeep.greaterThan(0))), () => { const n = tPnoiseD(vec2(q.x.div(VL).add(31), q.y.mod(256*VL).div(VL).add(7)), TU/VL, tw(q)).toVar(); nv.assign(vec3(n.x, n.yz.div(VL))); });
+      If(anyVS.and(vKeep.greaterThan(0).or(tKeep.greaterThan(0))), () => { const n = tPnoiseD(vec2(q.x.div(VL).add(31), ym(q.y, 256*VL).div(VL).add(7)), TU/VL, tw(q)).toVar(); nv.assign(vec3(n.x, n.yz.div(VL))); });
       If(wV.x.greaterThan(0), () => {
         const e = exp(nv.x.mul(nv.x).div(-(VW*VW))).toVar(), eK = mix(float(VALLEY_MEAN), e, vKeep);
         hs.subAssign(vec3(eK.mul(wV.x), wV.yz.mul(eK).add(nv.yz.mul(wV.x.mul(nv.x).mul(e).mul(-2/(VW*VW))).mul(vKeep))).mul(LF.valleyD));
@@ -1588,7 +1600,7 @@ function makeLib(){
       If(wM.x.greaterThan(0), () => {
         const acc = vec3(MOUND_MEAN, 0, 0).toVar();
         If(mKeep.greaterThan(0), () => {
-          const c = q.div(LF.moundC).toVar(), ci = floor(c).toVar(), af = vec3(0).toVar();
+          const c = vec2(q.x, ym(q.y, SPER)).div(LF.moundC).toVar(), ci = floor(c).toVar(), af = vec3(0).toVar();
           // the cells whose mound can reach here: a mound turned up to moundAng and stretched to 1/moundE reaches 1.31 cells across and 1.83 along
           // (its window ends at r = 1.1; its centre is within moundJ/2 of its cell's): 4 columns on this point's side of its cell and 5 rows -
           // 20 cells, every one that can reach, where the 5 x 7 search did 35 (the bakes ran ~3x slower with it: focus-page hitches)
@@ -1641,7 +1653,7 @@ function makeLib(){
         // of the step); and on gentle ground (under ~2-7 degrees of the smooth form) soil mantles the beds, so no ledges show at all. Before
         // this every tier was a ledge on every slope: on rolling land the steps traced the strata noise's own contours, rings like a map's.
         // (Differential erosion of interbedded hard/soft strata; soil-mantled low slopes: the "stepped slopes" of arid plateaus, not of grassland.)
-        const lat = tPnoiseD(vec2(q.x.div(1.6).add(71), q.y.mod(256*1.6).div(1.6).add(13)), TU/1.6, tw(q)).toVar();
+        const lat = tPnoiseD(vec2(q.x.div(1.6).add(71), ym(q.y, 256*1.6).div(1.6).add(13)), TU/1.6, tw(q)).toVar();
         // (each bed's hardness blends into the next bed's across the tier, by the riser's own quintic: switched at the tier boundary it made the
         // slope jump there - a crease along every tier edge, which any sampling turned into jagged material edges)
         // (one hardness per shelf, changing only across the riser below it, from the bed beneath to this one: blended across the whole tier, a
@@ -1673,8 +1685,8 @@ function makeLib(){
     rw.mulAssign(U_CRAG);
     If(rw.mul(lf0).greaterThan(0.001), () => {
       const Lw = LF.cragWL, W = LF.cragW;
-      const wa = tPnoiseD(vec2(q.x.div(Lw).add(3.7), q.y.mod(256*Lw).div(Lw).add(8.1)), TU/Lw, tw(q)).toVar();
-      const wb = tPnoiseD(vec2(q.x.div(Lw).add(41.3), q.y.mod(256*Lw).div(Lw).add(2.9)), TU/Lw, tw(q)).toVar();
+      const wa = tPnoiseD(vec2(q.x.div(Lw).add(3.7), ym(q.y, 256*Lw).div(Lw).add(8.1)), TU/Lw, tw(q)).toVar();
+      const wb = tPnoiseD(vec2(q.x.div(Lw).add(41.3), ym(q.y, 256*Lw).div(Lw).add(2.9)), TU/Lw, tw(q)).toVar();
       const wq = q.add(vec2(wa.x, wb.x).mul(W)).toVar();
       const ja = wa.yz.mul(W/Lw), jb = wb.yz.mul(W/Lw);   // gradients of the warp offsets
       const cg = vec2(0).toVar(), ch = float(0).toVar(), pr = float(1).toVar(), pg = vec2(0).toVar();
@@ -1682,7 +1694,7 @@ function makeLib(){
         const L = LF.cragL[k], A = LF.cragA[k]*LF.cragS;
         const lf = smoothstep(L, L*0.5, lod).toVar();   // (fades only once its cell is under two texels: the sampling limit. Fading earlier made the crags grow in as finer levels took over in front of you)
         If(lf.greaterThan(0.001), () => {
-          const cn = tPnoiseD(vec2(wq.x.div(L).add(17.3 + 9*k), wq.y.mod(256*L).div(L).add(5.1)), TU/L, tw(q)).toVar();
+          const cn = tPnoiseD(vec2(wq.x.div(L).add(17.3 + 9*k), ym(wq.y, 256*L).div(L).add(5.1)), TU/L, tw(q)).toVar();
           // (a ROUNDED crest: smooth |n| = sqrt(n^2 + k^2) - k. A true |n| is a knife-edge where the slope flips sign, which any sampling turned into jagged lines)
           const sq = sqrt(cn.x.mul(cn.x).add(0.0036)).toVar(), rr = float(1).sub(sq.sub(0.06).mul(1.5)).toVar();
           const rc = max(rr, 0), gr = select(rr.greaterThan(0), cn.yz.mul(cn.x.div(sq).mul(-1.5).div(L)), vec2(0)).toVar();
@@ -1710,7 +1722,7 @@ function makeLib(){
     const q = q0.toVar(), J = vec4(1, 0, 0, 1).toVar();   // J = (dwx/dqx, dwx/dqy, dwy/dqx, dwy/dqy)
     If(dl.x.greaterThan(0), () => {   // (any warp at all: its amplitude 4*dl.x is continuous at 0, a threshold above 0 was a 39 m step)
       const Lw = 16, A = dl.x.mul(4);
-      const nA = tPnoiseD(vec2(q0.x.div(Lw).add(3.3), q0.y.mod(256*Lw).div(Lw).add(1.1)), TU/Lw, tw(q0)).toVar(), nB = tPnoiseD(vec2(q0.x.div(Lw).add(17.9), q0.y.mod(256*Lw).div(Lw).add(9.4)), TU/Lw, tw(q0)).toVar();
+      const nA = tPnoiseD(vec2(q0.x.div(Lw).add(3.3), ym(q0.y, 256*Lw).div(Lw).add(1.1)), TU/Lw, tw(q0)).toVar(), nB = tPnoiseD(vec2(q0.x.div(Lw).add(17.9), ym(q0.y, 256*Lw).div(Lw).add(9.4)), TU/Lw, tw(q0)).toVar();
       q.assign(q0.add(vec2(nA.x, nB.x).mul(A)));
       const kJ = A.div(Lw);
       J.assign(vec4(nA.y.mul(kJ).add(1), nA.z.mul(kJ), nB.y.mul(kJ), nB.z.mul(kJ).add(1)));
@@ -1720,7 +1732,7 @@ function makeLib(){
     const d1 = float(1.75*OCT_MEAN[1]).toVar(), g1 = vec2(0).toVar();
     { const L = EX_CELL, w = keep(L).toVar();
       If(w.greaterThan(0), () => {
-        const p = vec2(q0.x.div(L), q0.y.mod(256*L).div(L)).toVar(), i = floor(p).toVar(), f = p.sub(i).toVar(), nx = TU/L;   // (the grid layer is not warped: the dials' warp bends the fold octaves only, as in JS)
+        const p = vec2(q0.x.div(L), ym(q0.y, 256*L).div(L)).toVar(), i = floor(p).toVar(), f = p.sub(i).toVar(), nx = TU/L;   // (the grid layer is not warped: the dials' warp bends the fold octaves only, as in JS)
         const X0 = i.x.mod(nx).mod(256).toVar(), X1 = i.x.add(1).mod(nx).mod(256).toVar(), Y0 = i.y.mod(256).toVar(), Y1 = i.y.add(1).mod(256).toVar();
         const [c00, c10, c01, c11] = corners4(X0, X1, Y0, Y1, tw(q0));
         const b00 = abs(c00.z), b10 = abs(c10.z), b01 = abs(c01.z), b11 = abs(c11.z), u = quintic(f).toVar(), du = quinticD(f).toVar();
@@ -1733,7 +1745,7 @@ function makeLib(){
       const L = EX_CELL*Q, w = keep(L).toVar(), meanD = OCT_MEAN[Q], meanS = ABS_MEAN;
       const dv = float(Q*1.75*meanD).toVar(), gv = vec2(0).toVar(), ds = float(Q*1.75*meanS).toVar(), gs = vec2(0).toVar();
       If(w.greaterThan(0), () => {
-        const n = tPnoiseD(vec2(q.x.div(L), q.y.mod(256*L).div(L)), TU/L, tw(q0)).toVar();
+        const n = tPnoiseD(vec2(q.x.div(L), ym(q.y, 256*L).div(L)), TU/L, tw(q0)).toVar();
         // smooth |n|: the fold softened over ~2 grid cells (as the example's mesh and lighting do)
         const kk = 2/Q, sa = sqrt(n.x.mul(n.x).add(kk*kk)).toVar();
         dv.assign(mix(float(meanD), sa.sub(kk), w).mul(Q*1.75));
@@ -2174,7 +2186,7 @@ function cityPaint(col, dS){
 // (z = -s) for snapping; the scene itself is centred on you along the Way.
 const U_EYE = uniformR(new THREE.Vector3()), _shG = new THREE.Vector3();   // the viewer, for level of detail (shadow maps render from elsewhere)
 // (WebGPU only: on the WebGL2 fallback the depth compare reads nothing yet, so it keeps the soft decal shadows)
-const SH_GPU = renderer.backend.isWebGPUBackend === true;
+const SH_GPU = renderer.backend.isWebGPUBackend === true && !LAB;
 const SH_LAYERS = [2, 3, 4];    // what each level draws (casters are put on the layers of the levels they matter to)
 const SH_MARGIN = 1.8;          // km of light path upstream of a level: a 750 m tower's shadow reaches 1.5 km downwind
 const SH_GUARD = 0.15, SH_BLEND = 0.15;
@@ -2560,10 +2572,10 @@ const clipBakeMat = (() => {
   const m = new THREE.MeshBasicNodeMaterial({side: THREE.DoubleSide, depthTest: false, depthWrite: false, toneMapped: false});
   m.fog = false;
   m.fragmentNode = Fn(() => {
-    const {tBiomeAt, analyticBaked} = makeLib();
+    const {tBiomeAt, analyticBaked} = makeLib(QY);   // (precise along-axis coordinate: QY)
     const s = exp2(U_BK.add(CL.L0)).toVar();
-    const q = U_BO.add(vec2(floor(uv().x.mul(U_BN)), floor(uv().y.mul(U_BN))).mul(s)).toVar();
-    const th = q.x.div(TU).mul(TAU).toVar(), z = U.uSU.sub(q.y).div(SUK).toVar();
+    const q = vec2(U_BO.x.add(floor(uv().x.mul(U_BN)).mul(s)), floor(uv().y.mul(U_BN)).mul(s)).toVar();   // (y: the offset in the window; QY.Y0 its origin)
+    const th = q.x.div(TU).mul(TAU).toVar(), z = U.uSU.sub(q.y.add(QY.Y0)).div(SUK).toVar();
     const B = tBiomeAt(z, th, true);
     return analyticBaked(q, s, B.e.w, B.a.w.mul(5));   // (h is kept to -4..64: it reaches ~50 where a biome's amplitude is small; the old -2..4 capped snowlines and rock bands there)
   })();
@@ -2697,7 +2709,7 @@ function focusTarget(){
 }
 function focusBake(j){
   hc('focus bake');
-  U_BK.value = CL.FK0 + j; U_BO.value.copy(CL.forg[j]); U_BN.value = CL.FN; U_BROW.value = j; U_COVON.value = 1;
+  U_BK.value = CL.FK0 + j; U_BO.value.copy(CL.forg[j]); QY.set(CL.forg[j].y); U_BN.value = CL.FN; U_BROW.value = j; U_COVON.value = 1;
   CL.quad.position.set(0.5, j + 0.5, 0); CL.quad.updateMatrixWorld(); CL.fcam.updateMatrixWorld();
   CL.faoQuad.position.set(0.5, j + 0.5, 0); CL.faoQuad.updateMatrixWorld();
   const ac = renderer.autoClear; renderer.autoClear = false;
@@ -2735,7 +2747,7 @@ function focusUpdate(){
 }
 function clipBake(k){
   hc('level bake');
-  U_BK.value = k; U_BO.value.copy(CL.org[k]);
+  U_BK.value = k; U_BO.value.copy(CL.org[k]); QY.set(CL.org[k].y);
   CL.quad.position.set(0.5, k + 0.5, 0); CL.quad.updateMatrixWorld(); CL.cam.updateMatrixWorld();
   const ac = renderer.autoClear; renderer.autoClear = false;
   renderer.setRenderTarget(CL.rt); renderer.render(CL.scene, CL.cam); renderer.setRenderTarget(null);
@@ -4334,7 +4346,7 @@ function rebuildRocks(){
 }
 function updateRocks(alt){
   const on = mode !== 'space' && alt < 3 && !grassOff;
-  rockGroup.visible = on; ROCKS.on = on;
+  rockGroup.visible = on && !LAB; ROCKS.on = on && !LAB;
   if (!on) return;
   if (isNaN(ROCKS.sRef) || Math.abs(shipS - ROCKS.sRef) > 0.3 || Math.abs(angDiff(shipTh, ROCKS.thRef))*R > 0.3 || ROCKS.ver !== ROAD.ver) rebuildRocks();
   rockGroup.position.z = shipS - ROCKS.sRef;
@@ -5132,7 +5144,7 @@ const GRASS_RINGS = [
   // (to 1 km: tufts - fewer, wider, taller blades (sz 2.4: 0.8-1.7 m) - a 0.5 m blade is under a pixel past ~500 m, so the far meadow's texture
   // comes from bigger shapes, as BotW's distant grass does)
   {N: 120, C: 0.017, clumpR: 13, blades: 5, segs: 1, widthK: 22, sz: 2.4, fade: [0.42, 0.5, 0.88, 1.0], farK: [0.4, 0.7, 1.0], windFar: 1, salt: 199},
-].filter(r => r.C < 0.009 || renderer.backend.isWebGPUBackend === true).map(makeGrassRing);   // the 500 m and 1 km rings need GPU culling
+].filter(r => !LAB && (r.C < 0.009 || renderer.backend.isWebGPUBackend === true)).map(makeGrassRing);   // the 500 m and 1 km rings need GPU culling
 // (the 150 m and 500 m rings: fewer, wider blades and one segment - their blades were 1-2 px wide, and sub-pixel triangles shade each pixel
 // several times over (in 2 x 2 quads); the same cover, ~half the triangles)
 const grassGroup = new THREE.Group(); GRASS_RINGS.forEach(r => grassGroup.add(r.mesh)); grassGroup.visible = false; scene.add(grassGroup);
@@ -5747,7 +5759,7 @@ const FLORA_LAT = [
   {N: 128, C: 0.02, tiers: [0.3], reach: 0.0035, salt: 503, rock: true, spp: [0], lists: [[0, 0, 0]]},   // boulders
   {N: 96, C: 0.12, tiers: [3.0], reach: 0.02, salt: 607, rock: true, big: true, spp: [1, 2], lists: [[0, 0, 0], [1, 0, 0]]},   // basalt columns and hoodoos
 ].filter(cfg => !cfg.grove || renderer.backend.isWebGPUBackend === true)
- .map(cfg => renderer.backend.isWebGPUBackend === true ? cfg : {...cfg, N: cfg.bush ? 48 : 40}).map(makeFloraLattice);
+ .filter(() => !LAB).map(cfg => renderer.backend.isWebGPUBackend === true ? cfg : {...cfg, N: cfg.bush ? 48 : 40}).map(makeFloraLattice);
 const floraGroup = new THREE.Group(); FLORA_LAT.forEach(L => L.meshes.forEach(m => floraGroup.add(m))); floraGroup.visible = false; scene.add(floraGroup);
 const flora = {tex: null, redo: 0, near: null, f: 0};
 function updateFlora(alt){
@@ -5916,6 +5928,7 @@ const cloudSheet = (() => {
   return mesh;
 })();
 const cloudLayers = [cloudSheet];
+if (LAB) cloudSheet.visible = false;
 
 // ---------- everything above lives inside the Stone ----------
 const interior = new THREE.Group();
@@ -6332,6 +6345,7 @@ $('b-assist').textContent = 'Jeep assist: ' + (JA.on ? 'on' : 'off');
 $('b-assist').addEventListener('click', () => { JA.on = !JA.on; $('b-assist').textContent = 'Jeep assist: ' + (JA.on ? 'on' : 'off'); try { localStorage.setItem('assist', JA.on ? '1' : '0'); } catch (e) {} });
 // volumetric clouds (and their shadows) on or off, remembered
 function setClouds(on){
+  if (LAB) on = false;
   U.uClouds.value = on ? 1 : 0; cloudLayers.forEach(m => { m.visible = !!on; });
   try { localStorage.setItem('wayClouds', on ? '1' : '0'); } catch (e) {}
   $('b-clouds').textContent = 'Clouds: ' + (on ? 'on' : 'off');
@@ -6915,7 +6929,7 @@ function stepBody(now){
   setSpan(tubeStone, shipS, shipS - AFT_FACE + CAP); setSpan(tubeWay, -3000, Math.min(3000, shipS));
   // the glow along the axis fills the whole interior; the caps and terrain stop it (scene depth), so it never pops
   // in or out at a threshold
-  glowVol.visible = !inSpace;
+  glowVol.visible = !inSpace && !LAB;
   glowU.uGlow.value = 1;
   msgT -= dt;
   gateT.value = time % (20*Math.PI);
