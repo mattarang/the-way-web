@@ -597,13 +597,13 @@ function pnoise(x, y, nx, w, tr){
 // a value per grid point, linearly interpolated by the mesh. Evaluating it continuously instead shows the noise's
 // smooth folds as worm-like shapes, so it is sampled at grid points here too, eased between them (quintic: a slope that is
 // continuous, so the baked gradient - the shading - matches the baked height; bilinear gave a slope that jumps at every grid line).
+// The finest layer (q = 1). It was the example's value noise (|corner offset| at the lattice points, quintic-eased): its slope flattens along every
+// lattice line, a square grid of straight lines ~125 m apart that the lighting drew as dashed strips. Now a fold of GRADIENT noise fitted to the
+// same statistics (tools: lab/gridfit.js, 40,000 samples): equal mean and standard deviation, slope RMS within 4%, on a cell twice as large
+// (gradient noise's features are half its cell; 0.256 units divides TU and 256 of them SPER). No lattice, same roughness.
+const GRID_L = 2*EX_CELL, GRID_K = 0.15, GRID_S = 0.873, GRID_OFF = 0.0988;
 function grid1(qx, qy){
-  layerSet(qy/DWU);
-  const L = EX_CELL, x = qx/L, y = pmod(qy, 256*L)/L, fx = Math.floor(x), fy = Math.floor(y), dx = x - fx, dy = y - fy, nx = TU/L;
-  const X0 = pmod(pmod(fx, nx), 256), X1 = pmod(pmod(fx + 1, nx), 256), Y0 = pmod(fy, 256), Y1 = pmod(fy + 1, 256);
-  const b = (X, Y) => Math.abs(cornerL(X, Y, 2)), ux = dx*dx*dx*(dx*(dx*6 - 15) + 10), uy = dy*dy*dy*(dy*(dy*6 - 15) + 10);
-  const a0 = b(X0, Y0) + (b(X1, Y0) - b(X0, Y0))*ux, a1 = b(X0, Y1) + (b(X1, Y1) - b(X0, Y1))*ux;
-  return a0 + (a1 - a0)*uy;
+  return GRID_OFF + GRID_S*sabs(pnoise(qx/GRID_L + 7.7, pmod(qy, 256*GRID_L)/GRID_L + 3.3, TU/GRID_L, qy/DWU), GRID_K);
 }
 // Lowlands: the example is mountains everywhere. A regional mask (~30 km cells) blends to gently rolling lowland
 // just above the biome's water line (the odd pond), from softened q = 1, 5 and 25 layers.
@@ -853,7 +853,7 @@ const ARCH_DIAL = {'Seventh chamber parkland':[0,1,0,0], 'Grassland':[.1,.85,0,0
   'Mesa country':[.3,1.2,1,.3], 'Blue glacier':[.4,1.1,0,.6], 'Obsidian shards':[.7,1.4,.3,.9]};
 const DIALS = !/[?&]dials=0/.test(location.search);
 // ?terrain=uber: the terrain from one continuously-varying fractal (uberH, below) instead of the example's octaves + landform layers
-const UBER = !/[?&]terrain=classic\b/.test(location.search) && (() => { try { return localStorage.getItem('wayTerrain') !== 'classic'; } catch (e) { return true; } })();   // (the new terrain is the default; ?terrain=classic or Debug for the old)
+const UBER = /[?&]terrain=uber\b/.test(location.search) || (() => { try { return localStorage.getItem('wayTerrain') === 'uber'; } catch (e) { return false; } })();   // (experimental; the classic terrain is the default)
 let DEBUG_VIEWS = /[?&]dbg\b/.test(location.search);   // (also switched on at run time by the debug button: enableDebugViews rebuilds the materials with them)
 //   // the terrain's debug views are compiled into its shader only with ?dbg (they cost registers on every pixel)
 const ARCH_POS = {'Seventh chamber parkland':[.55,.55,.12,0], 'Grassland':[.5,.5,.2,.02], 'Old forest':[.42,.82,.4,.05], 'Dune sea':[.95,.04,.25,.08],
@@ -1823,7 +1823,10 @@ function makeLib(qy = null){
         If(lf.greaterThan(0.001), () => {
           const cn = tPnoiseD(vec2(wq.x.div(L).add(17.3 + 9*k), ym(wq.y, 256*L).div(L).add(5.1)), TU/L, tw(q)).toVar();
           // (a ROUNDED crest: smooth |n| = sqrt(n^2 + k^2) - k. A true |n| is a knife-edge where the slope flips sign, which any sampling turned into jagged lines)
-          const sq = sqrt(cn.x.mul(cn.x).add(0.0036)).toVar(), rr = float(1).sub(sq.sub(0.06).mul(1.5)).toVar();
+          // (prefiltered: the crest's rounding at least 5 samples wide - lod/L samples per noise unit of this octave; at level 0 it stays 0.06, as JS.
+          // A 0.06 crest is ~3 m at the finest octave, 2-3 texels of the 1 m level: it drew dashed hairlines)
+          const kc = max(float(0.06), lod.mul(5/L)).toVar();
+          const sq = sqrt(cn.x.mul(cn.x).add(kc.mul(kc))).toVar(), rr = float(1).sub(sq.sub(kc).mul(1.5)).toVar();
           const rc = max(rr, 0), gr = select(rr.greaterThan(0), cn.yz.mul(cn.x.div(sq).mul(-1.5).div(L)), vec2(0)).toVar();
           // weight by the previous octave's ridge (mirrors JS); its gradient follows by the product rule
           const wgt = k ? pr.mul(1 - LF.cragD).add(LF.cragD) : float(1), dwg = k ? pg.mul(1 - LF.cragD) : vec2(0);
@@ -1855,17 +1858,14 @@ function makeLib(qy = null){
       J.assign(vec4(nA.y.mul(kJ).add(1), nA.z.mul(kJ), nB.y.mul(kJ), nB.z.mul(kJ).add(1)));
     });
     const tJ = g => vec2(g.x.mul(J.x).add(g.y.mul(J.z)), g.x.mul(J.y).add(g.y.mul(J.w)));   // gradient back to the unwarped coordinates
-    // the grid layer (q = 1): |corner offset| at the lattice points, eased between them (quintic, mirrors grid1() in JS), with its slope
+    // the finest layer (q = 1): a fold of gradient noise fitted to the old value-noise layer's statistics (mirrors grid1() in JS: see there)
     const d1 = float(1.75*OCT_MEAN[1]).toVar(), g1 = vec2(0).toVar();
-    { const L = EX_CELL, w = keep(L).toVar();
+    { const L = GRID_L, w = keep(EX_CELL).toVar();
       If(w.greaterThan(0), () => {
-        const p = vec2(q0.x.div(L), ym(q0.y, 256*L).div(L)).toVar(), i = floor(p).toVar(), f = p.sub(i).toVar(), nx = TU/L;   // (the grid layer is not warped: the dials' warp bends the fold octaves only, as in JS)
-        const X0 = i.x.mod(nx).mod(256).toVar(), X1 = i.x.add(1).mod(nx).mod(256).toVar(), Y0 = i.y.mod(256).toVar(), Y1 = i.y.add(1).mod(256).toVar();
-        const [c00, c10, c01, c11] = corners4(X0, X1, Y0, Y1, tw(q0));
-        const b00 = abs(c00.z), b10 = abs(c10.z), b01 = abs(c01.z), b11 = abs(c11.z), u = quintic(f).toVar(), du = quinticD(f).toVar();
-        const a0 = mix(b00, b10, u.x).toVar(), a1 = mix(b01, b11, u.x).toVar();
-        d1.assign(mix(float(OCT_MEAN[1]), mix(a0, a1, u.y), w).mul(1.75));
-        g1.assign(vec2(mix(b10.sub(b00), b11.sub(b01), u.y).mul(du.x), a1.sub(a0).mul(du.y)).mul(w.mul(1.75/L)));
+        const n = tPnoiseD(vec2(q0.x.div(L).add(7.7), ym(q0.y, 256*L).div(L).add(3.3)), TU/L, tw(q0)).toVar();
+        const sa = sqrt(n.x.mul(n.x).add(GRID_K*GRID_K)).toVar();
+        d1.assign(mix(float(OCT_MEAN[1]), sa.sub(GRID_K).mul(GRID_S).add(GRID_OFF), w).mul(1.75));
+        g1.assign(n.yz.mul(w.mul(n.x.div(sa)).mul(GRID_S*1.75/L)));
       }); }
     const dq = [], gq = [], dsq = [], gsq = [];
     [5, 25, 125].forEach((Q, k) => {
