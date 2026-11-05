@@ -2884,9 +2884,15 @@ function bspFetch(read, c, f, sp){
   }
   return vec4(acc.x, vec2(gx, gy).div(sp), acc.w);
 }
+// (a real shader function, not inlined: its nine reads would otherwise be private variables of the caller's entry point, and Safari's WebGPU caps
+// those at 8 KB - the terrain's pixel shader passed it and stopped drawing on iPhones)
+let _tClipFetchQ = null;
 function clipFetchQ(kf, qr){
-  const t = clipT(kf, qr), c = clamp(floor(t.add(0.5)), vec2(1, 1), vec2(CL.N - 2, CL.N - 2)).toVar(), f = clamp(t.sub(c), -0.5, 0.5).toVar();
-  return bspFetch((i, j) => clipTexN.sample(clipUV(kf, c.x.add(i), c.y.add(j))).level(0), c, f, exp2(kf.add(CL.L0)));
+  _tClipFetchQ ??= fnL('clipFetchQ', 'vec4', ['kf:float', 'qr:vec2'], ([kf, qr]) => {
+    const t = clipT(kf, qr), c = clamp(floor(t.add(0.5)), vec2(1, 1), vec2(CL.N - 2, CL.N - 2)).toVar(), f = clamp(t.sub(c), -0.5, 0.5).toVar();
+    return bspFetch((i, j) => clipTexN.sample(clipUV(kf, c.x.add(i), c.y.add(j))).level(0), c, f, exp2(kf.add(CL.L0)));
+  });
+  return _tClipFetchQ(kf, qr);
 }
 // kf's data if qr lies inside that level's window, else the nearest coarser level (up to 4 up) that covers it; none: w = 99 (the caller then
 // stands in the analytic terrain)
@@ -2916,6 +2922,15 @@ function clipFetchLevel(kp, qr, smooth = false){
 const clipFetchDist = (dNoise, qr) => clipFetchLevel(clipLevel(dNoise).toVar(), qr, true);   // (pixels and per-point lookups: the smooth reconstruction)
 // the focus page data under camera-relative qr for a pixel needing level kd (texels about two pixels): {d: vec4 like clipFetch, w: 0..1 weight,
 // 0 where no page covers it or every covering page is too fine for this pixel (it would shimmer: the pages have no mips)}
+let _tFocusPage = null;
+function focusPageFetch(t, row, sp){
+  _tFocusPage ??= fnL('focusPage', 'vec4', ['t:vec2', 'row:float', 'sp:float'], ([t, row, sp]) => {
+    const c = floor(t.add(0.5)).toVar(), f = clamp(t.sub(c), -0.5, 0.5).toVar();
+    const at = (dx, dy) => { const v = row.add(c.y).add(dy).add(0.5).div(CL.FN*CL.NF); return clipFTexN.sample(vec2(c.x.add(dx).add(0.5).div(CL.FN), CL.flip ? float(1).sub(v) : v)).level(0); };
+    return bspFetch(at, c, f, sp);
+  });
+  return _tFocusPage(t, row, sp);
+}
 function clipFocus(qr, kd, ke){   // ke: the level the regular data actually gives here (a page is used only where it is finer)
   // composited coarse to fine, each page weighted by its edge fade (32 texels) and by how well its texel size suits this pixel (1 where its
   // level is at least kd, fading to 0 one level finer: the page levels blend like mip levels, with no threshold to pop at)
@@ -2927,9 +2942,7 @@ function clipFocus(qr, kd, ke){   // ke: the level the regular data actually giv
     const edge = min(min(t.x, t.y), min(float(CL.FN - 1).sub(t.x), float(CL.FN - 1).sub(t.y))).sub(CL.MARG);
     const g = smoothstep(0, 32, edge).mul(clamp(float(CL.FK0 + j + 1).sub(kd), 0, 1)).mul(clamp(ke.sub(CL.FK0 + j), 0, 1)).toVar();   // (and only finer than the levels: near you they are coarser, and they follow your gaze)
     If(g.greaterThan(0.001), () => {
-      const c = floor(t.add(0.5)).toVar(), f = clamp(t.sub(c), -0.5, 0.5).toVar();   // (quadratic B-spline, as clipFetchQ)
-      const at = (dx, dy) => { const v = float(j*CL.FN).add(c.y).add(dy).add(0.5).div(CL.FN*CL.NF); return clipFTexN.sample(vec2(c.x.add(dx).add(0.5).div(CL.FN), CL.flip ? float(1).sub(v) : v)).level(0); };
-      const dj = bspFetch(at, c, f, sp).toVar();
+      const dj = focusPageFetch(t, float(j*CL.FN), float(sp)).toVar();   // (quadratic B-spline, as clipFetchQ; a shader function: see clipFetchQ)
       const va = float(j*CL.FN).add(t.y).add(0.5).div(CL.FN*CL.NF), aj = faoTexN.sample(vec2(t.x.add(0.5).div(CL.FN), CL.flip ? float(1).sub(va) : va)).level(0).toVar();
       const shj = max(max(aj.y, aj.z), shB);
       // the page's AO and cast shadow only from 64 texels in (fully at 96): their bake marched up to 60 texels toward the light and read clamped
