@@ -642,9 +642,12 @@ function basinB(qx, qy){
 // (tuned in the terrain lab, scratchpad lab/: ridged dramatic ranges, strongly warped coasts and ranges, regions of differing relief)
 // (after dandrino/terrain-erosion-3-ways: ONE large, low-frequency warp - it bends ranges and coasts; the finer warp layer smeared ridges into
 // swirls - smooth plain fBm on low ground - billowed |n| folds there were pits - and the classic per-octave gain of 1/2)
-const UB = {L0: 16, N: 9, warpL: 32, k0: 0.045, m0: 0.2328, zN: 0.127, mtn0: 0.3, mtnA: 0.6, wet: 0.6, tierKm: 0.25,
+const UB = {L0: 16, N: 4, warpL: 32, k0: 0.045, m0: 0.2328, zN: 0.127, mtn0: 0.3, mtnA: 0.6, wet: 0.6, tierKm: 0.25,
   sharpRamp: 2, sharp0: 0.2, sharpM: 0.6, sharpR: 0.6, ero0: 0.35, eroM: 0.3, gain: 0.5, warp0: 3, low0: 0.10, lowA: 0.25, altEro: 0.3,
-  expMu: 1.0001, warp2: 0, rel0: 0.55, relA: 1.0};   // EXPONENTIALLY DISTRIBUTED gradients (Parberry 2015, JCGT 4(2): real terrain's gradients are exponentially distributed at every scale;
+  expMu: 1.0001, warp2: 0, rel0: 0.55, relA: 1.0,
+  // EROSION FILTER over the smooth base (N = 4 octaves: 16 .. 2 km): cells EC0 noise units (~0.98 km) halving over EN octaves (to ~61 m; every cell
+  // divides TU and SPER: no seams), gully depth ES x 481.5 m at the first octave (lab: ~0.1 of the cell), ridge / crease rounding ERR / ERC
+  EC0: 1, EN: 5, ES: 0.13, ERR: 0.9, ERC: 0.2, EGW: 0.8};   // (lab: softer than Rune's pointy 0.22/0.5 - no aliased blades)   // EXPONENTIALLY DISTRIBUTED gradients (Parberry 2015, JCGT 4(2): real terrain's gradients are exponentially distributed at every scale;
                   // cited by Sean Murray as shaping No Man's Sky's generator): each lattice point's gradient scaled by mu^-k, k a hash 0..255 (his
                   // magnitude table, mu = 1.02 as in his code), normalized to unit RMS - mostly gentle ground, now and then a steep feature
 UB.expN = 1/Math.sqrt((1 - Math.pow(UB.expMu, -512))/(256*(1 - Math.pow(UB.expMu, -2))));   // (1 / RMS of mu^-k over k = 0..255)
@@ -709,7 +712,60 @@ function uberShape(U, wl, amp, m, mesa, rel = 1){
     h = h + (wl + (f + st)/NT - h)*mesa*smooth(0, 0.05, d); }
   return h;
 }
+// RUNE'S EROSION FILTER, per point. Advanced Terrain Erosion Filter and Phacelle Noise copyright (c) 2025 Rune Skovbo Johansen
+// (https://www.shadertoy.com/view/wXcfWn, https://blog.runevision.com/2026/03/fast-and-gorgeous-erosion-filter.html), ported via the Godot
+// project's way_common.gdshaderinc. This Source Code Form (this function and the GPU's tUberEro) is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// Stripes along the downhill direction in randomly pivoted cells, blended (Phacelle noise), over octaves; the fade approach (crisp peaks and V
+// valleys, fading toward the target fade -1 valley .. 1 peak), stacked fading (the combi-mask), partial normalisation (k = 2), straight gullies
+// (the sign of the gully slope), a pretend input slope (0.7), ease-out slope shaping, ridge/crease rounding, gully weight EGW with 1/EGW strength.
+// In: q (noise units), g (slope, m/m), fade; returns [dh m, dgx, dgy m/m]. lod: the sampling spacing - octaves under ~2-4 samples fade out.
+function uberEro(qx, qy, gx, gy, fade, strength, lod){
+  const easeOut = t => { const v = 1 - Math.max(0, Math.min(1, t)); return 1 - v*v; };
+  const smoothStart = (t, sm) => { sm = Math.max(sm, 1e-6); return t >= sm ? t - 0.5*sm : 0.5*t*t/sm; };
+  const powInv = (t, p) => 1 - Math.pow(1 - Math.max(0, Math.min(1, t)), p);
+  const KM = 1000/SUK, sl = Math.max(Math.hypot(gx, gy), 1e-6);
+  let mask = easeOut(smoothStart(sl*1.25, (UB.ERC + (UB.ERR - UB.ERC)*Math.max(0, Math.min(1, fade + 0.5)))*0.1*1.25));
+  let gsx = gx/sl*0.7, gsy = gy/sl*0.7, hE = 0, gEx = 0, gEy = 0, A = strength*481.5/UB.EGW, C = UB.EC0, rmult = 1;
+  for (let o = 0; o < UB.EN; o++){
+    const salt = o*977 + 4801, gl = Math.hypot(gsx, gsy) || 1e-9, dx = gsx/gl, dy = gsy/gl, sx = -dy*0.7*6.2831853, sy = dx*0.7*6.2831853;
+    const px = qx/C, py = qy/C, cx = Math.floor(px), cy = Math.floor(py), fx = px - cx, fy = py - cy, nx = TU/C, ny = SPER/C;
+    let pdx = 0, pdy = 0, ws = 0;
+    for (let j = 0; j < 4; j++) for (let i = 0; i < 4; i++){
+      const oi = i - 1, oj = j - 1, X = pmod(cx + oi, nx), Y = pmod(cy + oj, ny);
+      const rx = hashI(X + salt, Y*3 + salt) - 0.5, ry = hashI(X + salt + 131, Y*3 + salt + 57) - 0.5;
+      const vx = fx - oi - rx, vy = fy - oj - ry, w = Math.max(Math.exp(-2*(vx*vx + vy*vy)) - 0.01111, 0), wi = vx*sx + vy*sy + 0.25*6.2831853;
+      pdx += Math.cos(wi)*w; pdy += Math.sin(wi)*w; ws += w;
+    }
+    let ix = pdx/Math.max(ws, 1e-6), iy = pdy/Math.max(ws, 1e-6); const il = Math.max(Math.hypot(ix, iy), 0.5); ix /= il; iy /= il;
+    const Cm = C*KM, dzx = -sx/Cm, dzy = -sy/Cm, sloping = Math.abs(iy);
+    const sg = iy > 0 ? 1 : iy < 0 ? -1 : 0, k = Math.pow(0.5, o)*481.5*0.5;
+    gsx += dzx*sg*k; gsy += dzy*sg*k;
+    const gd = (vnoise(qx/(C*2) + salt*0.013, qy/(C*2) + salt*0.013, TU/(C*2), SPER/(C*2))*2 - 1)*0.6 + 1;
+    const gulH = ix*gd, gulX = dzx*iy*gd, gulY = dzy*iy*gd;
+    const vis = lod > 0 ? smooth(lod*2, lod*4, C) : 1, mv = mask*vis;   // (octaves finer than ~2-4 samples fade to the target)
+    const fH = fade + (gulH*UB.EGW - fade)*mv, fX = gulX*UB.EGW*mv, fY = gulY*UB.EGW*mv;
+    hE += fH*A; gEx += fX*A; gEy += fY*A; fade = fH;
+    const nm = easeOut(smoothStart(sloping*1.25, (UB.ERC + (UB.ERR - UB.ERC)*Math.max(0, Math.min(1, ix + 0.5)))*rmult*1.25));
+    mask = powInv(mask, 1.5)*nm;
+    A *= 0.5; C *= 0.5; rmult *= 2;
+  }
+  return [hE, gEx, gEy];
+}
+// the base's normalized height at q (no erosion), and its noise value U (for the fade target)
+function uberBase(qx, qy, wl, amp, dl, lod){
+  const [m, sharp, ero, gainK, warpA, mesa, rel] = uberMacro(qx, qy, amp, dl);
+  const U = uberN(qx, qy, lod, sharp, ero, gainK, warpA);
+  return [uberShape(U, wl, amp, m, mesa, rel), U];
+}
 function uberH(qx, qy, wl = 0, amp = 1, dl = null, lod = 0){
+  const [h0, U] = uberBase(qx, qy, wl, amp, dl, lod), e = Math.max(lod*0.5, 2e-4);
+  if (!(UB.ES > 0) || h0 <= wl) return h0;
+  const gx = (uberBase(qx + e, qy, wl, amp, dl, lod)[0] - h0)/e*amp*SUK, gy = (uberBase(qx, qy + e, wl, amp, dl, lod)[0] - h0)/e*amp*SUK;   // (m/m)
+  const fade = Math.max(-1, Math.min(1, U/UB.zN/1.5)), str = smooth(0, 0.08, h0 - wl)*UB.ES;
+  return h0 + uberEro(qx, qy, gx, gy, fade, str, lod)[0]/(amp*1000);
+}
+function uberHOld(qx, qy, wl = 0, amp = 1, dl = null, lod = 0){
   const [m, sharp, ero, gainK, warpA, mesa, rel] = uberMacro(qx, qy, amp, dl);
   return uberShape(uberN(qx, qy, lod, sharp, ero, gainK, warpA), wl, amp, m, mesa, rel);   // (no basin layer: its +-0.4 regional steps drew walls round lakes and flat plateaus)
 }
@@ -855,7 +911,7 @@ const ARCH_DIAL = {'Seventh chamber parkland':[0,1,0,0], 'Grassland':[.1,.85,0,0
   'Mesa country':[.3,1.2,1,.3], 'Blue glacier':[.4,1.1,0,.6], 'Obsidian shards':[.7,1.4,.3,.9]};
 const DIALS = !/[?&]dials=0/.test(location.search);
 // ?terrain=uber: the terrain from one continuously-varying fractal (uberH, below) instead of the example's octaves + landform layers
-const UBER = /[?&]terrain=uber\b/.test(location.search) || (() => { try { return localStorage.getItem('wayTerrain') === 'uber'; } catch (e) { return false; } })();   // (experimental; the classic terrain is the default)
+const UBER = !/[?&]terrain=classic\b/.test(location.search) && (() => { try { return localStorage.getItem('wayTerrain') !== 'classic'; } catch (e) { return true; } })();   // (the eroded uber terrain is the default; ?terrain=classic or Debug for the old)
 let DEBUG_VIEWS = /[?&]dbg\b/.test(location.search);   // (also switched on at run time by the debug button: enableDebugViews rebuilds the materials with them)
 //   // the terrain's debug views are compiled into its shader only with ?dbg (they cost registers on every pixel)
 const ARCH_POS = {'Seventh chamber parkland':[.55,.55,.12,0], 'Grassland':[.5,.5,.2,.02], 'Old forest':[.42,.82,.4,.05], 'Dune sea':[.95,.04,.25,.08],
@@ -1954,7 +2010,44 @@ function makeLib(qy = null){
     });
     return h;
   };
-  // height and its slope: three evaluations, the slope by differences at half the sample spacing (normals follow the heights exactly)
+  // Rune's erosion filter (mirrors uberEro in JS, see there for the credit and the MPL-2.0 terms of this function)
+  const tUberEro = fnL('uberEro', 'vec3', ['q:vec2', 'g:vec2', 'fade0:float', 'strength:float', 'lod:float'], ([q, g, fade0, strength, lod]) => {
+    const easeOut = t => { const v = clamp(t, 0, 1).oneMinus(); return v.mul(v).oneMinus(); };
+    const smoothStart = (t, sm) => { const s2 = max(sm, 1e-6); return select(t.greaterThanEqual(s2), t.sub(s2.mul(0.5)), t.mul(t).mul(0.5).div(s2)); };
+    const powInv = (t, p) => pow(clamp(t, 0, 1).oneMinus(), p).oneMinus();
+    const KM = 1000/SUK, sl = max(length(g), 1e-6).toVar(), fade = float(fade0).toVar();
+    const mask = easeOut(smoothStart(sl.mul(1.25), mix(float(UB.ERC), float(UB.ERR), clamp(fade.add(0.5), 0, 1)).mul(0.1*1.25))).toVar();
+    const gs = g.div(sl).mul(0.7).toVar(), hE = float(0).toVar(), A = strength.mul(481.5/UB.EGW).toVar(), C = float(UB.EC0).toVar(), rmult = float(1).toVar();
+    Loop({start: 0, end: UB.EN, type: 'int', name: 'eroO'}, ({eroO}) => {
+      const salt = float(eroO).mul(977).add(4801).toVar();
+      const dir = normalize(gs.add(vec2(1e-9, 0))).toVar(), side = vec2(dir.y.negate(), dir.x).mul(0.7*6.2831853).toVar();
+      const pp = q.div(C).toVar(), ci = floor(pp).toVar(), pf = pp.sub(ci).toVar(), nx = float(TU).div(C), ny = float(SPER).div(C);
+      const pd = vec2(0).toVar(), ws = float(0).toVar();
+      Loop({start: 0, end: 4, type: 'int', name: 'eroJ'}, ({eroJ}) => {
+        Loop({start: 0, end: 4, type: 'int', name: 'eroI'}, ({eroI}) => {
+          const oi = float(eroI).sub(1), oj = float(eroJ).sub(1);
+          const X = ci.x.add(oi).sub(nx.mul(floor(ci.x.add(oi).div(nx)))), Y = ci.y.add(oj).sub(ny.mul(floor(ci.y.add(oj).div(ny))));   // (pmod)
+          const ro = vec2(tHashI(vec2(X.add(salt), Y.mul(3).add(salt))), tHashI(vec2(X.add(salt).add(131), Y.mul(3).add(salt).add(57)))).sub(0.5);
+          const v = pf.sub(vec2(oi, oj)).sub(ro).toVar();
+          const w = max(exp(dot(v, v).mul(-2)).sub(0.01111), 0).toVar(), wi = dot(v, side).add(0.25*6.2831853);
+          pd.addAssign(vec2(cos(wi), sin(wi)).mul(w)); ws.addAssign(w);
+        });
+      });
+      const ip0 = pd.div(max(ws, 1e-6)), ip = ip0.div(max(length(ip0), 0.5)).toVar();
+      const dzw = side.div(C.mul(KM)).negate().toVar(), sloping = abs(ip.y);
+      gs.addAssign(dzw.mul(sign(ip.y)).mul(pow(float(0.5), float(eroO)).mul(481.5*0.5)));
+      const gd = tVnoise(q.div(C.mul(2)).add(salt.mul(0.013)), vec2(TU, SPER).div(C.mul(2))).mul(2).sub(1).mul(0.6).add(1);
+      const vis = select(lod.greaterThan(0), smoothstep(lod.mul(2), lod.mul(4), C), float(1));
+      const fH = mix(fade, ip.x.mul(gd).mul(UB.EGW), mask.mul(vis));
+      hE.addAssign(fH.mul(A)); fade.assign(fH);
+      const nm = easeOut(smoothStart(sloping.mul(1.25), mix(float(UB.ERC), float(UB.ERR), clamp(ip.x.add(0.5), 0, 1)).mul(rmult).mul(1.25)));
+      mask.assign(powInv(mask, 1.5).mul(nm));
+      A.mulAssign(0.5); C.mulAssign(0.5); rmult.mulAssign(2);
+    });
+    return vec3(hE, 0, 0);
+  });
+  // height and its slope: the base at three points (its slope from them), the erosion at each; the output slope by differences at half the sample
+  // spacing (normals follow the heights exactly). The base slope at q stands in at the two offset points (the base is smooth: its finest octave 2 km)
   const uberAt = (q, lod, wl, amp, rg) => {
     const t = clamp(rg.mn.x.add(clamp(amp.sub(1.5).div(2.5), -0.4, 0.6).mul(0.35)).add(0.25).div(0.3), 0, 1), m = t.mul(t).mul(t.mul(-2).add(3)).toVar();
     const dl = rg.dl || vec4(0, 1, 0, 0);
@@ -1962,9 +2055,18 @@ function makeLib(qy = null){
     const ero = m.mul(UB.eroM).add(UB.ero0).toVar(), gainK = sqrt(clamp(dl.y, 0.5, 1.4)).mul(UB.gain).toVar(), warpA = dl.x.mul(2).add(UB.warp0).toVar();
     const rt = clamp(rg.rB.x.add(0.35).div(0.7), 0, 1), rel = rt.mul(rt).mul(rt.mul(-2).add(3)).mul(UB.relA).add(UB.rel0).toVar();   // (relief field, as JS)
     const e = max(lod.mul(0.5), 2e-4).toVar();
-    const H = lq => tUberShape(tUberN(lq, lod, sharp, ero, gainK, warpA), wl, amp, m, dl.z, rel);
-    const h0 = H(q).toVar(), hx = H(q.add(vec2(e, 0))), hy = H(q.add(vec2(0, e)));
-    return vec3(h0, hx.sub(h0).div(e), hy.sub(h0).div(e));
+    const U0 = tUberN(q, lod, sharp, ero, gainK, warpA).toVar();
+    const H = U => tUberShape(U, wl, amp, m, dl.z, rel);
+    const b0 = H(U0).toVar(), bx = H(tUberN(q.add(vec2(e, 0)), lod, sharp, ero, gainK, warpA)).toVar(), by = H(tUberN(q.add(vec2(0, e)), lod, sharp, ero, gainK, warpA)).toVar();
+    const out = vec3(b0, bx.sub(b0).div(e), by.sub(b0).div(e)).toVar();
+    if (UB.ES > 0) If(b0.greaterThan(wl), () => {
+      const g = out.yz.mul(amp).mul(SUK).toVar(), fade = clamp(U0.div(UB.zN*1.5), -1, 1).toVar(), str = smoothstep(0, 0.08, b0.sub(wl)).mul(UB.ES).toVar(), k = amp.mul(1000);
+      const qe = vec2(q.x, ym(q.y, SPER)).toVar();   // (the absolute along-axis coordinate, wrapped at SPER: the bake's q.y is an offset in its window)
+      const e0 = tUberEro(qe, g, fade, str, lod).x.div(k).toVar();
+      const ex = tUberEro(qe.add(vec2(e, 0)), g, fade, str, lod).x.div(k), ey = tUberEro(qe.add(vec2(0, e)), g, fade, str, lod).x.div(k);
+      out.assign(vec3(b0.add(e0), bx.add(ex).sub(b0.add(e0)).div(e), by.add(ey).sub(b0.add(e0)).div(e)));
+    });
+    return out;
   };
   const analyticBaked = (q, lod, wl, amp) => {
     const ha = (UBER ? uberAt(q, lod, wl, amp, regions(q, wl)) : terrainAt(q, lod, wl, amp, regions(q, wl))).toVar(), hh = ha.x;
@@ -6574,7 +6676,7 @@ $('b-close').addEventListener('click', () => { el.sheet.hidden = true; });
 // the debug sheet: its own short menu (opened from Places), so testing doesn't mean scrolling the place list each time
 $('b-dbgm').addEventListener('click', () => { el.sheet.hidden = true; $('dsheet').hidden = false; });
 $('b-dclose').addEventListener('click', () => { $('dsheet').hidden = true; });
-$('b-ter').textContent = 'Terrain: ' + (UBER ? 'NEW (uber noise)' : 'classic') + ' (tap: reloads)';
+$('b-ter').textContent = 'Terrain: ' + (UBER ? 'eroded (uber + erosion filter)' : 'classic') + ' (tap: reloads)';
 $('b-ter').addEventListener('click', () => { try { localStorage.setItem('wayTerrain', UBER ? 'classic' : 'uber'); } catch (e) {} location.reload(); });
 $('b-res').addEventListener('click', () => {
   resFix = RES_OPTS[(RES_OPTS.indexOf(resFix) + 1) % RES_OPTS.length];
