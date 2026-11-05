@@ -249,6 +249,7 @@ button:disabled{opacity:.45}
   <button id="b-exact" class="perfbtn" type="button">Exact near ground: off (experimental)</button>
   <button id="b-rukm" class="perfbtn" type="button">Terrain scale: 24 km per Rune unit</button>
   <button id="b-ruc" class="perfbtn" type="button">Terrain noise centre: +0.14</button>
+  <button id="b-ruv" class="perfbtn" type="button">Terrain variety: off (Rune's parameters everywhere)</button>
   <button id="b-hmap" class="perfbtn" type="button">Heightmap debug: off</button>
   <button id="b-hide" class="perfbtn" type="button">Hide (profiling): nothing</button>
   <button id="b-ter" class="perfbtn" type="button">Terrain: classic</button>
@@ -743,7 +744,7 @@ function uberH(qx, qy, wl = 0, amp = 1, dl = null, lod = 0){   // (Rune's terrai
 // fades to the filter's own fade target (its notion of the mean below that detail), so coarse levels hold what they can and agree with the fine.
 const RU = {km: 24, scale: 0.15, strength: 0.22, gully: 0.5, detail: 1.5, round: [0.1, 0.0, 0.1, 2.0], onset: [1.25, 1.25, 2.8, 1.5], aslope: [0.7, 1.0],
   cell: 0.7, norm: 0.5, oct: 5, lac: 2.0, gain: 0.5, hoff: [-0.65, 0.0], hfreq: 3.0, hamp: 0.125, hoct: 3, hlac: 2.0, hgain: 0.1,
-  center: 0.14, relLow: 0.3, fillEro: false};   // center: how far (Rune units, x the relief) his terrain's mid height sits above our water line (0)   // relLow: lowland relief vs mountain (x the regional relief); fillEro: the CPU fast fill runs the erosion too (lab)
+  center: 0.14, relLow: 0.3, vary: false, fillEro: false};   // vary: the world's variety (relK) on; off = his exact parameters everywhere   // center: how far (Rune units, x the relief) his terrain's mid height sits above our water line (0)   // relLow: lowland relief vs mountain (x the regional relief); fillEro: the CPU fast fill runs the erosion too (lab)
 const ruNU = () => RU.km*SUK;   // noise units per Rune unit
 // a lattice of f cells per Rune unit, wrapped: [frequency x, y (cells per Rune unit), cells around, cells along]
 const ruAxis = f => { const U = ruNU(), nx = Math.max(1, Math.round(TU/U*f)), ny = Math.max(1, Math.round(SPER/U*f)); return [nx/(TU/U), ny/(SPER/U), nx, ny]; };
@@ -816,12 +817,12 @@ function ruHeight(qx, qy, lod, relK, ero = true){
   const offset = (RU.hoff[0] + (-fade0 - RU.hoff[0])*RU.hoff[1])*magnitude;
   return [n0 + h0 + offset, n1 + h1, n2 + h2, rmFade*(1 - rmMask), h0/magnitude];
 }
-// the world's relief factor (mountain mask mm, regional relief rel) and the normalized height h for Rune's eroded height E (Rune units): our
-// macro elevation above the water line (lowland .. mountain, wetter biomes lower), plus his relief about his mid height 0.5 raised by the NOISE
-// CENTRE (RU.center x the relief: 0.14 puts our water line where his demo's water sits, so only the deepest valleys flood; scaled with the
-// relief, so gentle land isn't left a high plateau), in km. The water line stays the datum (0).
-const ruRelK = (rel, mm) => Math.max(0.1, Math.min(1.6, rel*(RU.relLow + (1 - RU.relLow)*mm)));
-const ruToH = (E, wl, amp, mm, relK) => wl + UB.low0 + (UB.mtn0 - UB.low0)*mm - UB.wet*(wl - 0.25) + (E - 0.5 + RU.center*relK)*RU.km/Math.max(amp, 0.05);
+// the world's relief factor (mountain mask mm, regional relief rel: smooth fields that scale only his height amplitude and erosion strength)
+// and the normalized height h for Rune's eroded height E (Rune units): HIS HEIGHT ALONE above the water line (the datum, 0) - his relief
+// about his mid height 0.5, raised by the NOISE CENTRE (RU.center x the relief: 0.14 puts our water line where his demo's water sits, so only
+// the deepest valleys flood; scaled with the relief, so gentle land isn't left a high plateau), in km. Nothing else is added to his terrain.
+const ruRelK = (rel, mm) => RU.vary ? Math.max(0.1, Math.min(1.6, rel*(RU.relLow + (1 - RU.relLow)*mm))) : 1;   // (off: 1, his demo everywhere)
+const ruToH = (E, wl, amp, mm, relK) => wl + (E - 0.5 + RU.center*relK)*RU.km/Math.max(amp, 0.05);
 function uberHOld(qx, qy, wl = 0, amp = 1, dl = null, lod = 0){
   const [m, sharp, ero, gainK, warpA, mesa, rel] = uberMacro(qx, qy, amp, dl);
   return uberShape(uberN(qx, qy, lod, sharp, ero, gainK, warpA), wl, amp, m, mesa, rel);   // (no basin layer: its +-0.4 regional steps drew walls round lakes and flat plateaus)
@@ -1479,6 +1480,15 @@ const LAB = /[?&]lab\b/.test(location.search);
 // MSAA 4x on phones too (Debug can turn it off; it reloads): Apple's tile GPUs resolve it on chip, and at the phone's 1.25-1.5x pixel ratio (of a
 // 3x screen) the grass blades and tree edges were a field of jaggies without it
 const AA_ON = (() => { try { return localStorage.getItem('wayAA') !== '0'; } catch (e) { return true; } })();
+// GPU AND SHADER ERRORS ON SCREEN (a phone has no console): three reports a failed pipeline or shader with console.error; the device's uncaptured
+// errors too. The first few are shown in a small red box (tap to close).
+const gpuErr = (() => { let box = null, n = 0; const seen = new Set();
+  return msg => { msg = String(msg).slice(0, 600); if (seen.has(msg) || n >= 4) return; seen.add(msg); n++;
+    if (!box){ box = document.createElement('div'); box.style.cssText = 'position:fixed;left:8px;right:8px;top:calc(8px + env(safe-area-inset-top,0px));z-index:9999;background:rgba(80,0,0,0.88);color:#ffd9d2;font:11px/1.35 ui-monospace,monospace;padding:8px 10px;border-radius:8px;white-space:pre-wrap;max-height:40vh;overflow:auto';
+      box.addEventListener('click', () => { box.remove(); box = null; }); document.body.appendChild(box); }
+    box.textContent += (box.textContent ? '\n\n' : '') + msg; }; })();
+{ const ce = console.error.bind(console); console.error = (...a) => { ce(...a); try { const t = a.map(x => x && x.message ? x.message : String(x)).join(' ');
+  if (/pipeline|shader|WGSL|GPU|compil|validation/i.test(t)) gpuErr(t); } catch (e) {} }; }
 const renderer = new THREE.WebGPURenderer({canvas, antialias: AA_ON, reversedDepthBuffer: true, powerPreference:'high-performance', forceWebGL: /[?&]webgl\b/.test(location.search)});
 await renderer.init();
 // REVERSED DEPTH (float depth, 1 at the near plane, 0 at the far: the precision follows the distance's own scale): one pass covers your feet
@@ -1648,7 +1658,7 @@ const sstep01 = t => t.mul(t).mul(t.mul(-2).add(3));
 // as rows of teeth, and as the windows moved the staircase moved with them (flicker). In a bake, q.y is the texel's small offset inside its
 // window and the window's origin Y0 is kept exact on the CPU (double), reduced there by every period the terrain wraps at (QY.mods): each
 // wrap (q.y mod P) becomes ((Y0 mod P) + y) mod P, exact. Everything else (pixels, vertices) keeps the plain coordinate (QY null).
-const U_RUNU = uniform(RU.km*SUK), U_RUC = uniform(RU.center);   // noise units per Rune unit (the terrain scale), the noise centre (see RU)
+const U_RUNU = uniform(RU.km*SUK), U_RUC = uniform(RU.center), U_RUV = uniform(RU.vary ? 1 : 0);   // noise units per Rune unit (the terrain scale), the noise centre (see RU)
 const QY = {Y0: uniform(0), mods: new Map(), mod(P){ if (!this.mods.has(P)) this.mods.set(P, uniform(((this.Y0.value % P) + P) % P)); return this.mods.get(P); },
   set(Y0){ this.Y0.value = Y0; for (const [P, u] of this.mods) u.value = ((Y0 % P) + P) % P; }};
 function makeLib(qy = null){
@@ -2100,7 +2110,7 @@ function makeLib(qy = null){
   });
   // Heightmap() + ErosionFilter() at q (noise units; q.y absolute, wrapped at SPER), lod = sample spacing, relK = the world's relief factor.
   // Returns vec4(eroded height (Rune units), slope x, slope y, packed: round(ridge map 0..1 x 255) + erosion offset 0..1 x 0.998)
-  const tRuHeight = fnL('ruHeight', 'vec4', ['q:vec2', 'lod:float', 'relK:float'], ([q, lod, relK]) => {
+  const mkRuHeight = ero => fnL(ero ? 'ruHeight' : 'ruHeightBase', 'vec4', ['q:vec2', 'lod:float', 'relK:float'], ([q, lod, relK]) => {
     const Un = U_RUNU, p = q.div(Un).toVar(), span = vec2(float(TU), float(SPER)).div(Un).toVar();
     const axis = f => { const per = max(floor(span.mul(f).add(0.5)), 1).toVar(); return {per, fr: per.div(span).toVar()}; };
     const lodC = max(lod, 1e-7), vis = lam => smoothstep(lodC.mul(4), lodC.mul(8), lam.mul(Un));
@@ -2123,7 +2133,9 @@ function makeLib(qy = null){
     const rIn = mix(float(rnd[1]), float(rnd[0]), clamp(fadeTarget.add(0.5), 0, 1)).mul(rnd[2]);
     const combi = easeOut(smoothStart(sl.mul(on[0]), rIn.mul(on[0]))).toVar(), rmMask = easeOut(sl.mul(on[2])).toVar(), rmFade = float(fadeTarget).toVar();
     const gullySlope = mix(n.yz, n.yz.div(sl).mul(RU.aslope[0]), RU.aslope[1]).toVar(), hs = vec3(0).toVar();
-    Loop({start: 0, end: RU.oct, type: 'int', name: 'ruO'}, () => {
+    const gsum = (1 - Math.pow(RU.gain, RU.oct))/(1 - RU.gain);
+    if (!ero){ magnitude.assign(strength.mul(gsum)); hs.x.assign(fadeTarget.mul(magnitude)); }   // (every octave at its fade target: no loop emitted)
+    else Loop({start: 0, end: RU.oct, type: 'int', name: 'ruO'}, () => {
       const v = vis(float(1).div(freq.mul(RU.cell))).toVar();
       If(v.greaterThan(0), () => {
         const {per, fr} = axis(freq);
@@ -2148,20 +2160,23 @@ function makeLib(qy = null){
     const packed = floor(clamp(ridge.mul(0.5).add(0.5), 0, 1).mul(255).add(0.5)).add(clamp(eroD.mul(0.5).add(0.5), 0, 1).mul(0.998));
     return vec4(n.x.add(hs.x).add(offset), n.yz.add(hs.yz), packed);
   });
+  // (the full filter for the bake; the base alone - every octave at its fade target - for the render shaders' rare no-data fallback: the erosion's
+  // nested Phacelle loops kept out of the terrain's vertex shader, which Safari's WebGPU failed to draw with them)
+  const tRuHeight = mkRuHeight(true), tRuHeightBase = mkRuHeight(false);
   // the eroded terrain at q: Rune's height over our macro elevation (ruToH); the heights-only bake carries his ridge map and erosion offset in
   // y and z (the ridge pass stores them); elsewhere y, z are the slope (normalized h per noise unit, from his analytic slope)
-  const uberAt = (q, lod, wl, amp, rg, hOnly = false) => {
+  const uberAt = (q, lod, wl, amp, rg, hOnly = false, ero = true) => {
     const t = clamp(rg.mn.x.add(clamp(amp.sub(1.5).div(2.5), -0.4, 0.6).mul(0.35)).add(0.25).div(0.3), 0, 1), m = t.mul(t).mul(t.mul(-2).add(3)).toVar();
     const rt = clamp(rg.rB.x.add(0.35).div(0.7), 0, 1), rel = rt.mul(rt).mul(rt.mul(-2).add(3)).mul(UB.relA).add(UB.rel0).toVar();   // (relief field, as JS)
-    const mm = m.mul(m).mul(m.mul(-2).add(3)).toVar(), relK = clamp(rel.mul(mm.mul(1 - RU.relLow).add(RU.relLow)), 0.1, 1.6).toVar();
-    const r = tRuHeight(vec2(q.x, ym(q.y, SPER)), lod, relK).toVar();
+    const mm = m.mul(m).mul(m.mul(-2).add(3)).toVar(), relK = mix(float(1), clamp(rel.mul(mm.mul(1 - RU.relLow).add(RU.relLow)), 0.1, 1.6), U_RUV).toVar();   // (ruRelK)
+    const r = (ero ? tRuHeight : tRuHeightBase)(vec2(q.x, ym(q.y, SPER)), lod, relK).toVar();
     const ampC = max(amp, 0.05).toVar();
-    const h = wl.add(UB.low0).add(mm.mul(UB.mtn0 - UB.low0)).sub(wl.sub(0.25).mul(UB.wet)).add(r.x.sub(0.5).add(relK.mul(U_RUC)).mul(U_RUNU).div(SUK).div(ampC)).toVar();   // (ruToH)
+    const h = wl.add(r.x.sub(0.5).add(relK.mul(U_RUC)).mul(U_RUNU).div(SUK).div(ampC)).toVar();   // (ruToH: his height alone above the water line)
     if (hOnly) return vec3(h, floor(r.w).div(255).mul(2).sub(1), fract(r.w).div(0.998).mul(2).sub(1));
     return vec3(h, r.yz.div(ampC.mul(SUK)));
   };
-  const analyticBaked = (q, lod, wl, amp, hOnly = false) => {
-    const ha = (UBER ? uberAt(q, lod, wl, amp, regions(q, wl), hOnly) : terrainAt(q, lod, wl, amp, regions(q, wl))).toVar(), hh = ha.x;
+  const analyticBaked = (q, lod, wl, amp, hOnly = false) => {   // (hOnly: the bake - the full erosion; elsewhere the no-data fallback: its base)
+    const ha = (UBER ? uberAt(q, lod, wl, amp, regions(q, wl), hOnly, hOnly) : terrainAt(q, lod, wl, amp, regions(q, wl))).toVar(), hh = ha.x;
     const yz = hOnly && UBER ? ha.yz : ha.yz.mul(amp.mul(bedSlope(amp.mul(wl.sub(hh)))));   // (heights-only bake: y carries the ridge map)
     return vec4(select(hh.greaterThanEqual(wl), amp.mul(hh.sub(wl)), tBedDepth(amp.mul(wl.sub(hh))).negate()), yz, clamp(hh, -4, 64));   // (the 'no data' marker is w = 99: tests use > 98 - a test at 50 threw away real heights of the flattest biomes, h up to ~57)
   };
@@ -6871,6 +6886,16 @@ function setRuC(c){
 }
 { let c = 0.14; try { const v = localStorage.getItem('wayRuC'); if (v !== null) c = +v; } catch (e) {} if (!RU_CS.includes(c)) c = 0.14; RU.center = c; U_RUC.value = c;
   $('b-ruc').textContent = 'Terrain noise centre: +' + c.toFixed(2) + ' (~' + (c*RU.km).toFixed(1) + ' km on mountains)'; }
+// TERRAIN VARIETY: off = his exact parameters everywhere (the clean test); on = our mountain mask x regional relief scale his height amplitude and
+// erosion strength continuously (relK, 0.1 .. 1.6)
+function setRuV(on){
+  RU.vary = on; U_RUV.value = on ? 1 : 0; try { localStorage.setItem('wayRuV', on ? '1' : '0'); } catch (e) {}
+  $('b-ruv').textContent = 'Terrain variety: ' + (on ? 'on (relief scales his amplitude and strength)' : "off (Rune's parameters everywhere)");
+  for (const o of CL.forg) o.set(1e9, 1e9); clipRebakeHere();
+}
+{ let on = false; try { on = localStorage.getItem('wayRuV') === '1'; } catch (e) {} RU.vary = on; U_RUV.value = on ? 1 : 0;
+  $('b-ruv').textContent = 'Terrain variety: ' + (on ? 'on (relief scales his amplitude and strength)' : "off (Rune's parameters everywhere)"); }
+$('b-ruv').addEventListener('click', () => setRuV(!RU.vary));
 $('b-ruc').addEventListener('click', () => setRuC(RU_CS[(RU_CS.indexOf(RU.center) + 1) % RU_CS.length]));
 $('b-exact').addEventListener('click', () => { const on = !(U_REF.value > 1.5); window.__ref(on ? 2 : 0); $('b-exact').textContent = 'Exact near ground: ' + (on ? 'on' : 'off') + ' (experimental)'; });
 // the exact view as text (to paste into a bug report): replayed with window.__go(mode, s, th, r, yaw, pitch) and window.__far(k)
@@ -7668,11 +7693,14 @@ const LOAD = {t0: 0, rec: []};   // (t0: the page opening)
     const orig = dev[n]; if (!orig) continue;
     dev[n] = function(d){
       const t = performance.now(), label = (d.label || n).replace(/^(render|compute)Pipeline_/, ''), kb = ((d.fragment || d.compute || {}).module || {}).__kb || 0;
-      const pr = orig.call(dev, d); const fin = () => { LOAD.rec.push([performance.now() - t, label, kb]); }; pr.then(fin, fin); return pr;
+      const pr = orig.call(dev, d); const fin = () => { LOAD.rec.push([performance.now() - t, label, kb]); };
+      pr.then(fin, e => { fin(); gpuErr('Pipeline ' + label + ' (' + kb + ' KB) failed: ' + (e && e.message || e)); }); return pr;
     };
   }
   const sm = dev && dev.createShaderModule;
-  if (sm) dev.createShaderModule = function(d){ const m = sm.call(dev, d); try { m.__kb = Math.round(d.code.length/1024); } catch (e) {} return m; };
+  if (sm) dev.createShaderModule = function(d){ const m = sm.call(dev, d); try { m.__kb = Math.round(d.code.length/1024);
+    m.getCompilationInfo && m.getCompilationInfo().then(ci => { const er = ci.messages.filter(x => x.type === 'error'); if (er.length) gpuErr('Shader ' + (d.label || '') + ' (' + m.__kb + ' KB): ' + er.slice(0, 3).map(x => 'line ' + x.lineNum + ': ' + x.message).join(' | ')); }); } catch (e) {} return m; };
+  if (dev) dev.addEventListener('uncapturederror', e => gpuErr('GPU: ' + (e.error && e.error.message || e)));
 }
 const loadInfo = $('loadinfo');
 setTimeout(async () => {
