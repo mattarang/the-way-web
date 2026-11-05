@@ -247,6 +247,8 @@ button:disabled{opacity:.45}
   <button id="b-perf" class="perfbtn" type="button">Performance monitor: off</button>
   <button id="b-pos" class="perfbtn" type="button">Copy position (for bug reports)</button>
   <button id="b-exact" class="perfbtn" type="button">Exact near ground: off (experimental)</button>
+  <button id="b-rukm" class="perfbtn" type="button">Terrain scale: 12 km per Rune unit</button>
+  <button id="b-ruc" class="perfbtn" type="button">Terrain noise centre: +0.14</button>
   <button id="b-hmap" class="perfbtn" type="button">Heightmap debug: off</button>
   <button id="b-hide" class="perfbtn" type="button">Hide (profiling): nothing</button>
   <button id="b-ter" class="perfbtn" type="button">Terrain: classic</button>
@@ -717,69 +719,109 @@ function uberShape(U, wl, amp, m, mesa, rel = 1){
     h = h + (wl + (f + st)/NT - h)*mesa*smooth(0, 0.05, d); }
   return h;
 }
-// RUNE'S EROSION FILTER, per point. Advanced Terrain Erosion Filter and Phacelle Noise copyright (c) 2025 Rune Skovbo Johansen
-// (https://www.shadertoy.com/view/wXcfWn, https://blog.runevision.com/2026/03/fast-and-gorgeous-erosion-filter.html), ported via the Godot
-// project's way_common.gdshaderinc. This Source Code Form (this function and the GPU's tUberEro) is subject to the terms of the Mozilla Public
-// License, v. 2.0. If a copy of the MPL was not distributed with this file, You can obtain one at https://mozilla.org/MPL/2.0/.
-// Stripes along the downhill direction in randomly pivoted cells, blended (Phacelle noise), over octaves; the fade approach (crisp peaks and V
-// valleys, fading toward the target fade -1 valley .. 1 peak), stacked fading (the combi-mask), partial normalisation (k = 2), straight gullies
-// (the sign of the gully slope), a pretend input slope (0.7), ease-out slope shaping, ridge/crease rounding, gully weight EGW with 1/EGW strength.
-// In: q (noise units), g (slope, m/m), fade; returns [dh m, dgx, dgy m/m]. lod: the sampling spacing - octaves under ~2-4 samples fade out.
-function uberEro(qx, qy, gx, gy, fade, strength, lod){
-  const easeOut = t => { const v = 1 - Math.max(0, Math.min(1, t)); return 1 - v*v; };
-  const smoothStart = (t, sm) => { sm = Math.max(sm, 1e-6); return t >= sm ? t - 0.5*sm : 0.5*t*t/sm; };
-  const powInv = (t, p) => 1 - Math.pow(1 - Math.max(0, Math.min(1, t)), p);
-  const KM = 1000/SUK, sl = Math.max(Math.hypot(gx, gy), 1e-6);
-  let mask = easeOut(smoothStart(sl*1.25, (UB.ERC + (UB.ERR - UB.ERC)*Math.max(0, Math.min(1, fade + 0.5)))*0.1*1.25));
-  let gsx = gx/sl*0.7, gsy = gy/sl*0.7, hE = 0, gEx = 0, gEy = 0, A = strength*481.5/UB.EGW, C = UB.EC0, rmult = 1;
-  let rmask = easeOut(sl*2.8), rfade = fade;   // (the ridge map, as the Godot project's erosion_filter_f: ERO_ONSET.z / .w = 2.8 / 1.5)
-  for (let o = 0; o < UB.EN; o++){
-    const salt = o*977 + 4801, gl = Math.hypot(gsx, gsy) || 1e-9, dx = gsx/gl, dy = gsy/gl, sx = -dy*0.7*6.2831853, sy = dx*0.7*6.2831853;
-    const px = qx/C, py = qy/C, cx = Math.floor(px), cy = Math.floor(py), fx = px - cx, fy = py - cy, nx = TU/C, ny = SPER/C;
-    let pdx = 0, pdy = 0, ws = 0;
-    for (let j = 0; j < 4; j++) for (let i = 0; i < 4; i++){
-      const oi = i - 1, oj = j - 1, X = pmod(cx + oi, nx), Y = pmod(cy + oj, ny);
-      const rx = hashI(X + salt, Y*3 + salt) - 0.5, ry = hashI(X + salt + 131, Y*3 + salt + 57) - 0.5;
-      const vx = fx - oi - rx, vy = fy - oj - ry, w = Math.max(Math.exp(-2*(vx*vx + vy*vy)) - 0.01111, 0), wi = vx*sx + vy*sy + 0.25*6.2831853;
-      pdx += Math.cos(wi)*w; pdy += Math.sin(wi)*w; ws += w;
-    }
-    let ix = pdx/Math.max(ws, 1e-6), iy = pdy/Math.max(ws, 1e-6); const il = Math.max(Math.hypot(ix, iy), 0.5); ix /= il; iy /= il;
-    const Cm = C*KM, dzx = -sx/Cm, dzy = -sy/Cm, sloping = Math.abs(iy);
-    // (the straight-gully steering: the reference's sign(), made continuous over a band that widens with the sample spacing - sign() flips on
-    // every crest and gully line, a discontinuity each level sampled into its own jagged teeth)
-    const sw = Math.max(0.25, lod*8/C), sg = Math.max(-1, Math.min(1, iy/sw)), k = Math.pow(0.5, o)*481.5*0.5;
-    gsx += dzx*sg*k; gsy += dzy*sg*k;
-    const gd = (vnoise(qx/(C*2) + salt*0.013, qy/(C*2) + salt*0.013, TU/(C*2), SPER/(C*2))*2 - 1)*0.6 + 1;
-    const gulH = ix*gd, gulX = dzx*iy*gd, gulY = dzy*iy*gd;
-    const vis = lod > 0 ? smooth(lod*3, lod*6, C) : 1, mv = mask*vis;   // (octaves finer than ~2-4 samples fade to the target)
-    const fH = fade + (gulH*UB.EGW - fade)*mv, fX = gulX*UB.EGW*mv, fY = gulY*UB.EGW*mv;
-    hE += fH*A; gEx += fX*A; gEy += fY*A; fade = fH;
-    const nm = easeOut(smoothStart(sloping*1.25, Math.max((UB.ERC + (UB.ERR - UB.ERC)*Math.max(0, Math.min(1, ix + 0.5)))*rmult, lod*6/C)*1.25));   // (crests at least ~2 samples round)
-    mask = powInv(mask, 1.5)*nm;
-    rfade += (gulH - rfade)*rmask; rmask *= easeOut(sloping*1.5);
-    A *= 0.5; C *= 0.5; rmult *= 2;
-  }
-  return [hE, gEx, gEy, rfade*(1 - rmask)];   // (ridge: -1 creases .. 1 ridges)
-}
 // the base's normalized height at q (no erosion), and its noise value U (for the fade target)
 function uberBase(qx, qy, wl, amp, dl, lod){
   const [m, sharp, ero, gainK, warpA, mesa, rel] = uberMacro(qx, qy, amp, dl);
   const U = uberN(qx, qy, lod, sharp, ero, gainK, warpA);
   return [uberShape(U, wl, amp, m, mesa, rel), U];
 }
-function uberH(qx, qy, wl = 0, amp = 1, dl = null, lod = 0){
-  const [h0, U] = uberBase(qx, qy, wl, amp, dl, lod), e = Math.max(lod*0.5, 2e-4);
-  if (!(UB.ES > 0) || h0 <= wl || !UB.fillEro) return h0;   // (the CPU copy is the fast fill: no erosion - the truth is the bake, see CL.NC)
-  // (the base slope - the gullies' steering - over ONE fixed step, UB.EFD, on CPU and GPU alike: the gully pattern is sensitive to its direction,
-  // and a step that followed each side's sample spacing put CPU and GPU metres apart)
-  // (central differences over 2*EFD = 200 m: the float32 heights carry ~2 cm of rounding, and over the old 10 m forward step that was ~0.3 deg of
-  // steering jitter per texel - which the filter amplified into metre-high per-texel spikes that changed with every re-bake. The base's finest
-  // octave is 2 km, so the wider step is still its true slope)
-  const E = UB.EFD, B = (x, y) => uberBase(x, y, wl, amp, dl, lod)[0];
-  const gx = (B(qx + E, qy) - B(qx - E, qy))/(2*E)*amp*SUK, gy = (B(qx, qy + E) - B(qx, qy - E))/(2*E)*amp*SUK;   // (m/m)
-  const fade = Math.max(-1, Math.min(1, U/UB.zN/1.5)), str = smooth(0, 0.08, h0 - wl)*UB.ES;
-  return h0 + uberEro(qx, qy, gx, gy, fade, str, lod)[0]/(amp*1000);
+function uberH(qx, qy, wl = 0, amp = 1, dl = null, lod = 0){   // (Rune's terrain: see RU; the CPU copy is the fast fill - no erosion unless RU.fillEro)
+  const M = uberMacro(qx, qy, amp, dl), m = M[0], mm = m*m*(3 - 2*m), relK = ruRelK(M[6], mm);
+  return ruToH(ruHeight(qx, pmod(qy, SPER), lod, relK, RU.fillEro)[0], wl, amp, mm, relK);
 }
+// ---------- RUNE'S TERRAIN (the eroded terrain's height: the default) ----------
+// Rune Skovbo Johansen's "Advanced Terrain Erosion Filter" Shadertoy (https://www.shadertoy.com/view/wXcfWn; blog.runevision.com/2026/03/
+// fast-and-gorgeous-erosion-filter.html), ported VERBATIM from its Buffer A (via optozorax's faithful port): the base heightmap (FractalNoise of
+// IQ's derivative noise), PhacelleNoise and ErosionFilter with the Shadertoy's default parameters, the height offset and the outputs (ridge map,
+// erosion offset). Phacelle Noise function and Advanced Terrain Erosion Filter copyright (c) 2025 Rune Skovbo Johansen. This Source Code Form
+// (ruNoised, ruPhacelle, ruHeight and their GPU twins) is subject to the terms of the Mozilla Public License, v. 2.0. If a copy of the MPL was not
+// distributed with this file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// Adapted only where the world needs it: (1) Rune's fract() hash -> our integer lattice hash (hashI), each lattice WRAPPED around the ring and the
+// Way (its cell count per axis rounded: <0.5% stretch), so the terrain is seamless and precise anywhere; (2) one Rune unit = RU.km km (the Debug
+// menu's terrain scale); (3) the world's variety drives only his height amplitude and erosion strength (relK: our mountain mask x regional relief;
+// at 0 strength his terrain is the gentle green panel of his comparison); (4) level of detail: an octave whose wavelength is under ~4-8 samples
+// fades to the filter's own fade target (its notion of the mean below that detail), so coarse levels hold what they can and agree with the fine.
+const RU = {km: 12, scale: 0.15, strength: 0.22, gully: 0.5, detail: 1.5, round: [0.1, 0.0, 0.1, 2.0], onset: [1.25, 1.25, 2.8, 1.5], aslope: [0.7, 1.0],
+  cell: 0.7, norm: 0.5, oct: 5, lac: 2.0, gain: 0.5, hoff: [-0.65, 0.0], hfreq: 3.0, hamp: 0.125, hoct: 3, hlac: 2.0, hgain: 0.1,
+  center: 0.14, relLow: 0.3, fillEro: false};   // center: how far (Rune units, x the relief) his terrain's mid height sits above our water line (0)   // relLow: lowland relief vs mountain (x the regional relief); fillEro: the CPU fast fill runs the erosion too (lab)
+const ruNU = () => RU.km*SUK;   // noise units per Rune unit
+// a lattice of f cells per Rune unit, wrapped: [frequency x, y (cells per Rune unit), cells around, cells along]
+const ruAxis = f => { const U = ruNU(), nx = Math.max(1, Math.round(TU/U*f)), ny = Math.max(1, Math.round(SPER/U*f)); return [nx/(TU/U), ny/(SPER/U), nx, ny]; };
+const ruHash = (x, y) => [hashI(x, y)*2 - 1, hashI(x + 131, y + 57)*2 - 1];   // (Rune's hash(): a vec2 in -1..1)
+function ruNoised(px, py, nx, ny){   // IQ's gradient noise with derivatives (https://www.shadertoy.com/view/XdXBRH), the lattice wrapped at nx, ny
+  const ix = Math.floor(px), iy = Math.floor(py), fx = px - ix, fy = py - iy;
+  const ux = fx*fx*fx*(fx*(fx*6 - 15) + 10), uy = fy*fy*fy*(fy*(fy*6 - 15) + 10), dux = 30*fx*fx*(fx*(fx - 2) + 1), duy = 30*fy*fy*(fy*(fy - 2) + 1);
+  const x0 = pmod(ix, nx), x1 = pmod(ix + 1, nx), y0 = pmod(iy, ny), y1 = pmod(iy + 1, ny);
+  const ga = ruHash(x0, y0), gb = ruHash(x1, y0), gc = ruHash(x0, y1), gd = ruHash(x1, y1);
+  const va = ga[0]*fx + ga[1]*fy, vb = gb[0]*(fx - 1) + gb[1]*fy, vc = gc[0]*fx + gc[1]*(fy - 1), vd = gd[0]*(fx - 1) + gd[1]*(fy - 1), k = va - vb - vc + vd;
+  return [va + ux*(vb - va) + uy*(vc - va) + ux*uy*k,
+    ga[0] + ux*(gb[0] - ga[0]) + uy*(gc[0] - ga[0]) + ux*uy*(ga[0] - gb[0] - gc[0] + gd[0]) + dux*(uy*k + vb - va),
+    ga[1] + ux*(gb[1] - ga[1]) + uy*(gc[1] - ga[1]) + ux*uy*(ga[1] - gb[1] - gc[1] + gd[1]) + duy*(ux*k + vc - va)];
+}
+function ruPhacelle(px, py, nx, ny, dx, dy){   // PhacelleNoise(p, normDir, freq = RU.cell, offset = 0.25, normalization = RU.norm), the cells wrapped
+  const sx = -dy*RU.cell*6.28318530717959, sy = dx*RU.cell*6.28318530717959, off = 0.25*6.28318530717959;
+  const ix = Math.floor(px), iy = Math.floor(py), fx = px - ix, fy = py - iy;
+  let pcx = 0, pcy = 0, ws = 0;
+  for (let i = -1; i <= 2; i++) for (let j = -1; j <= 2; j++){
+    const r = ruHash(pmod(ix + i, nx), pmod(iy + j, ny)), vx = fx - i - r[0]*0.5, vy = fy - j - r[1]*0.5;
+    const w = Math.max(0, Math.exp(-(vx*vx + vy*vy)*2) - 0.01111), wi = vx*sx + vy*sy + off;
+    ws += w; pcx += Math.cos(wi)*w; pcy += Math.sin(wi)*w;
+  }
+  const ix2 = pcx/ws, iy2 = pcy/ws, mag = Math.max(1 - RU.norm, Math.hypot(ix2, iy2));
+  return [ix2/mag, iy2/mag, sx, sy];
+}
+const ruEaseOut = t => { const v = 1 - Math.max(0, Math.min(1, t)); return 1 - v*v; };
+const ruSmoothStart = (t, s) => t >= s ? t - 0.5*s : 0.5*t*t/s;
+const ruPowInv = (t, p) => 1 - Math.pow(1 - Math.max(0, Math.min(1, t)), p);
+// Rune's Heightmap() at noise coordinates (qx, qy wrapped at SPER), lod = sample spacing (noise units, 0 = full detail), relK = the world's relief
+// factor; ero = run the erosion filter. Returns [eroded height (Rune units), slope x, slope y (Rune units), ridge map, erosion offset (h.x / h.w)].
+function ruHeight(qx, qy, lod, relK, ero = true){
+  const U = ruNU(), px = qx/U, py = qy/U;
+  const vis = lam => lod > 0 ? smooth(4*lod, 8*lod, lam*U) : 1;   // (an octave of wavelength lam Rune units, against the sample spacing)
+  // FractalNoise(p, HEIGHT_FREQUENCY, HEIGHT_OCTAVES, HEIGHT_LACUNARITY, HEIGHT_GAIN) * HEIGHT_AMP
+  let n0 = 0, n1 = 0, n2 = 0, nf = RU.hfreq, na = 1;
+  for (let i = 0; i < RU.hoct; i++){
+    const [fx, fy, nx, ny] = ruAxis(nf), v = vis(1/nf);
+    if (v > 0){ const d = ruNoised(px*fx, py*fy, nx, ny); n0 += d[0]*na*v; n1 += d[1]*fx*na*v; n2 += d[2]*fy*na*v; }
+    na *= RU.hgain; nf *= RU.hlac;
+  }
+  const A = RU.hamp*relK; n0 *= A; n1 *= A; n2 *= A;
+  const fade0 = Math.max(-1, Math.min(1, n0/(A*0.6)));
+  n0 = n0*0.5 + 0.5; n1 *= 0.5; n2 *= 0.5;
+  // ErosionFilter(...)
+  let strength = RU.strength*relK*RU.scale, fadeTarget = fade0, freq = 1/(RU.scale*RU.cell), rmult = 1, magnitude = 0;
+  const sl = Math.max(Math.hypot(n1, n2), 1e-10), rnd = RU.round, on = RU.onset;
+  const rIn = (rnd[1] + (rnd[0] - rnd[1])*Math.max(0, Math.min(1, fadeTarget + 0.5)))*rnd[2];
+  let combi = ruEaseOut(ruSmoothStart(sl*on[0], rIn*on[0])), rmMask = ruEaseOut(sl*on[2]), rmFade = fadeTarget;
+  let gsx = n1 + (n1/sl*RU.aslope[0] - n1)*RU.aslope[1], gsy = n2 + (n2/sl*RU.aslope[0] - n2)*RU.aslope[1];
+  let h0 = 0, h1 = 0, h2 = 0;
+  for (let o = 0; o < RU.oct; o++){
+    const v = ero ? vis(1/(freq*RU.cell)) : 0;
+    if (v > 0){
+      const [fx, fy, nx, ny] = ruAxis(freq), gl = Math.hypot(gsx, gsy), dx = gl > 1e-10 ? gsx/gl : gsx, dy = gl > 1e-10 ? gsy/gl : gsy;
+      const ph = ruPhacelle(px*fx, py*fy, nx, ny, dx, dy), zx = -ph[2]*fx, zy = -ph[3]*fy, sloping = Math.abs(ph[1]);
+      const sg = ph[1] > 0 ? 1 : ph[1] < 0 ? -1 : 0;
+      gsx += sg*zx*strength*RU.gully*v; gsy += sg*zy*strength*RU.gully*v;
+      const g0 = ph[0], g1 = ph[1]*zx, g2 = ph[1]*zy;
+      let f0 = fadeTarget + (g0*RU.gully - fadeTarget)*combi, f1 = g1*RU.gully*combi, f2 = g2*RU.gully*combi;
+      f0 = fadeTarget + (f0 - fadeTarget)*v; f1 *= v; f2 *= v;   // (level of detail: toward the fade target)
+      h0 += f0*strength; h1 += f1*strength; h2 += f2*strength;
+      fadeTarget = f0;
+      const rO = (rnd[1] + (rnd[0] - rnd[1])*Math.max(0, Math.min(1, g0 + 0.5)))*rmult;
+      combi = ruPowInv(combi, RU.detail)*ruEaseOut(ruSmoothStart(sloping*on[1], rO*on[1]));
+      rmFade += (g0 - rmFade)*rmMask*v; rmMask *= 1 + (ruEaseOut(sloping*on[3]) - 1)*v;
+    } else h0 += fadeTarget*strength;
+    magnitude += strength; strength *= RU.gain; freq *= RU.lac; rmult *= rnd[3];
+  }
+  const offset = (RU.hoff[0] + (-fade0 - RU.hoff[0])*RU.hoff[1])*magnitude;
+  return [n0 + h0 + offset, n1 + h1, n2 + h2, rmFade*(1 - rmMask), h0/magnitude];
+}
+// the world's relief factor (mountain mask mm, regional relief rel) and the normalized height h for Rune's eroded height E (Rune units): our
+// macro elevation above the water line (lowland .. mountain, wetter biomes lower), plus his relief about his mid height 0.5 raised by the NOISE
+// CENTRE (RU.center x the relief: 0.14 puts our water line where his demo's water sits, so only the deepest valleys flood; scaled with the
+// relief, so gentle land isn't left a high plateau), in km. The water line stays the datum (0).
+const ruRelK = (rel, mm) => Math.max(0.1, Math.min(1.6, rel*(RU.relLow + (1 - RU.relLow)*mm)));
+const ruToH = (E, wl, amp, mm, relK) => wl + UB.low0 + (UB.mtn0 - UB.low0)*mm - UB.wet*(wl - 0.25) + (E - 0.5 + RU.center*relK)*RU.km/Math.max(amp, 0.05);
 function uberHOld(qx, qy, wl = 0, amp = 1, dl = null, lod = 0){
   const [m, sharp, ero, gainK, warpA, mesa, rel] = uberMacro(qx, qy, amp, dl);
   return uberShape(uberN(qx, qy, lod, sharp, ero, gainK, warpA), wl, amp, m, mesa, rel);   // (no basin layer: its +-0.4 regional steps drew walls round lakes and flat plateaus)
@@ -1606,6 +1648,7 @@ const sstep01 = t => t.mul(t).mul(t.mul(-2).add(3));
 // as rows of teeth, and as the windows moved the staircase moved with them (flicker). In a bake, q.y is the texel's small offset inside its
 // window and the window's origin Y0 is kept exact on the CPU (double), reduced there by every period the terrain wraps at (QY.mods): each
 // wrap (q.y mod P) becomes ((Y0 mod P) + y) mod P, exact. Everything else (pixels, vertices) keeps the plain coordinate (QY null).
+const U_RUNU = uniform(RU.km*SUK), U_RUC = uniform(RU.center);   // noise units per Rune unit (the terrain scale), the noise centre (see RU)
 const QY = {Y0: uniform(0), mods: new Map(), mod(P){ if (!this.mods.has(P)) this.mods.set(P, uniform(((this.Y0.value % P) + P) % P)); return this.mods.get(P); },
   set(Y0){ this.Y0.value = Y0; for (const [P, u] of this.mods) u.value = ((Y0 % P) + P) % P; }};
 function makeLib(qy = null){
@@ -2026,70 +2069,96 @@ function makeLib(qy = null){
     });
     return h;
   };
-  // Rune's erosion filter (mirrors uberEro in JS, see there for the credit and the MPL-2.0 terms of this function)
-  const tUberEro = fnL('uberEro', 'vec3', ['q:vec2', 'g:vec2', 'fade0:float', 'strength:float', 'lod:float'], ([q, g, fade0, strength, lod]) => {
-    const easeOut = t => { const v = clamp(t, 0, 1).oneMinus(); return v.mul(v).oneMinus(); };
-    const smoothStart = (t, sm) => { const s2 = max(sm, 1e-6); return select(t.greaterThanEqual(s2), t.sub(s2.mul(0.5)), t.mul(t).mul(0.5).div(s2)); };
-    const powInv = (t, p) => pow(clamp(t, 0, 1).oneMinus(), p).oneMinus();
-    const KM = 1000/SUK, sl = max(length(g), 1e-6).toVar(), fade = float(fade0).toVar();
-    const mask = easeOut(smoothStart(sl.mul(1.25), mix(float(UB.ERC), float(UB.ERR), clamp(fade.add(0.5), 0, 1)).mul(0.1*1.25))).toVar();
-    const rmask = easeOut(sl.mul(2.8)).toVar(), rfade = float(fade0).toVar();   // (the ridge map: see uberEro)
-    const gs = g.div(sl).mul(0.7).toVar(), hE = float(0).toVar(), A = strength.mul(481.5/UB.EGW).toVar(), C = float(UB.EC0).toVar(), rmult = float(1).toVar();
-    Loop({start: 0, end: UB.EN, type: 'int', name: 'eroO'}, ({eroO}) => {
-     If(select(lod.greaterThan(0), C.greaterThan(lod.mul(3)), true), () => {   // (octaves under two samples contribute nothing: skipped, not computed and faded)
-      const salt = float(eroO).mul(977).add(4801).toVar();
-      const dir = normalize(gs.add(vec2(1e-9, 0))).toVar(), side = vec2(dir.y.negate(), dir.x).mul(0.7*6.2831853).toVar();
-      const pp = q.div(C).toVar(), ci = floor(pp).toVar(), pf = pp.sub(ci).toVar(), nx = float(TU).div(C), ny = float(SPER).div(C);
-      const pd = vec2(0).toVar(), ws = float(0).toVar();
-      Loop({start: 0, end: 4, type: 'int', name: 'eroJ'}, ({eroJ}) => {
-        Loop({start: 0, end: 4, type: 'int', name: 'eroI'}, ({eroI}) => {
-          const oi = float(eroI).sub(1), oj = float(eroJ).sub(1);
-          const X = ci.x.add(oi).sub(nx.mul(floor(ci.x.add(oi).div(nx)))), Y = ci.y.add(oj).sub(ny.mul(floor(ci.y.add(oj).div(ny))));   // (pmod)
-          const ro = vec2(tHashI(vec2(X.add(salt), Y.mul(3).add(salt))), tHashI(vec2(X.add(salt).add(131), Y.mul(3).add(salt).add(57)))).sub(0.5);
-          const v = pf.sub(vec2(oi, oj)).sub(ro).toVar();
-          const w = max(exp(dot(v, v).mul(-2)).sub(0.01111), 0).toVar(), wi = dot(v, side).add(0.25*6.2831853);
-          pd.addAssign(vec2(cos(wi), sin(wi)).mul(w)); ws.addAssign(w);
-        });
-      });
-      const ip0 = pd.div(max(ws, 1e-6)), ip = ip0.div(max(length(ip0), 0.5)).toVar();
-      const dzw = side.div(C.mul(KM)).negate().toVar(), sloping = abs(ip.y);
-      gs.addAssign(dzw.mul(clamp(ip.y.div(max(float(0.25), lod.mul(8).div(C))), -1, 1)).mul(pow(float(0.5), float(eroO)).mul(481.5*0.5)));   // (continuous steering: see uberEro)
-      const gd = tVnoise(q.div(C.mul(2)).add(salt.mul(0.013)), vec2(TU, SPER).div(C.mul(2))).mul(2).sub(1).mul(0.6).add(1);
-      const vis = select(lod.greaterThan(0), smoothstep(lod.mul(3), lod.mul(6), C), float(1));
-      const fH = mix(fade, ip.x.mul(gd).mul(UB.EGW), mask.mul(vis));
-      hE.addAssign(fH.mul(A)); fade.assign(fH);
-      const nm = easeOut(smoothStart(sloping.mul(1.25), max(mix(float(UB.ERC), float(UB.ERR), clamp(ip.x.add(0.5), 0, 1)).mul(rmult), lod.mul(6).div(C)).mul(1.25)));   // (crests at least ~2 samples round)
-      mask.assign(powInv(mask, 1.5).mul(nm));
-      rfade.assign(mix(rfade, ip.x.mul(gd), rmask)); rmask.mulAssign(easeOut(sloping.mul(1.5)));
-     });
-      A.mulAssign(0.5); C.mulAssign(0.5); rmult.mulAssign(2);
-    });
-    return vec3(hE, rfade.mul(rmask.oneMinus()), 0);   // (y: the ridge map, -1 creases .. 1 ridges)
+  // RUNE'S TERRAIN (mirrors ruNoised / ruPhacelle / ruHeight in JS: see RU there for the credit and the MPL-2.0 terms of these functions)
+  const tRuHash = i => vec2(tHashI(i), tHashI(i.add(vec2(131, 57)))).mul(2).sub(1);
+  const tRuNoised = fnL('ruNoised', 'vec3', ['p:vec2', 'per:vec2'], ([p, per]) => {
+    const i = floor(p).toVar(), f = p.sub(i).toVar();
+    const u = f.mul(f).mul(f).mul(f.mul(f.mul(6).sub(15)).add(10)).toVar(), du = f.mul(f).mul(30).mul(f.mul(f.sub(2)).add(1)).toVar();
+    const i0 = tImod2(i, per).toVar(), i1 = tImod2(i.add(1), per).toVar();
+    const ga = tRuHash(i0).toVar(), gb = tRuHash(vec2(i1.x, i0.y)).toVar(), gc = tRuHash(vec2(i0.x, i1.y)).toVar(), gd = tRuHash(i1).toVar();
+    const va = dot(ga, f).toVar(), vb = dot(gb, f.sub(vec2(1, 0))).toVar(), vc = dot(gc, f.sub(vec2(0, 1))).toVar(), vd = dot(gd, f.sub(1)).toVar();
+    const k = va.sub(vb).sub(vc).add(vd).toVar();
+    return vec3(va.add(u.x.mul(vb.sub(va))).add(u.y.mul(vc.sub(va))).add(u.x.mul(u.y).mul(k)),
+      ga.add(gb.sub(ga).mul(u.x)).add(gc.sub(ga).mul(u.y)).add(ga.sub(gb).sub(gc).add(gd).mul(u.x.mul(u.y))).add(du.mul(u.yx.mul(k).add(vec2(vb, vc)).sub(va))));
   });
-  // height and its slope: the base at three points (its slope from them), the erosion at each; the output slope by differences at half the sample
-  // spacing (normals follow the heights exactly). The base slope at q stands in at the two offset points (the base is smooth: its finest octave 2 km)
+  const tRuPhacelle = fnL('ruPhacelle', 'vec4', ['p:vec2', 'per:vec2', 'normDir:vec2'], ([p, per, normDir]) => {
+    const sideDir = vec2(normDir.y.negate(), normDir.x).mul(RU.cell*6.28318530717959).toVar();
+    const pInt = floor(p).toVar(), pFrac = p.sub(pInt).toVar(), phaseDir = vec2(0).toVar(), weightSum = float(0).toVar();
+    Loop({start: -1, end: 2, type: 'int', condition: '<=', name: 'ruI'}, ({ruI}) => {
+      Loop({start: -1, end: 2, type: 'int', condition: '<=', name: 'ruJ'}, ({ruJ}) => {
+        const gridOffset = vec2(float(ruI), float(ruJ));
+        const randomOffset = tRuHash(tImod2(pInt.add(gridOffset), per)).mul(0.5);
+        const v = pFrac.sub(gridOffset).sub(randomOffset).toVar();
+        const weight = max(exp(dot(v, v).mul(-2)).sub(0.01111), 0).toVar();
+        weightSum.addAssign(weight);
+        const waveInput = dot(v, sideDir).add(0.25*6.28318530717959);
+        phaseDir.addAssign(vec2(cos(waveInput), sin(waveInput)).mul(weight));
+      });
+    });
+    const interpolated = phaseDir.div(weightSum).toVar(), magnitude = max(float(1 - RU.norm), length(interpolated));
+    return vec4(interpolated.div(magnitude), sideDir);
+  });
+  // Heightmap() + ErosionFilter() at q (noise units; q.y absolute, wrapped at SPER), lod = sample spacing, relK = the world's relief factor.
+  // Returns vec4(eroded height (Rune units), slope x, slope y, packed: round(ridge map 0..1 x 255) + erosion offset 0..1 x 0.998)
+  const tRuHeight = fnL('ruHeight', 'vec4', ['q:vec2', 'lod:float', 'relK:float'], ([q, lod, relK]) => {
+    const Un = U_RUNU, p = q.div(Un).toVar(), span = vec2(float(TU), float(SPER)).div(Un).toVar();
+    const axis = f => { const per = max(floor(span.mul(f).add(0.5)), 1).toVar(); return {per, fr: per.div(span).toVar()}; };
+    const lodC = max(lod, 1e-7), vis = lam => smoothstep(lodC.mul(4), lodC.mul(8), lam.mul(Un));
+    const easeOut = t => { const v = clamp(t, 0, 1).oneMinus(); return v.mul(v).oneMinus(); };
+    const smoothStart = (t, sm) => select(t.greaterThanEqual(sm), t.sub(sm.mul(0.5)), t.mul(t).mul(0.5).div(max(sm, 1e-20)));
+    const powInv = (t, pw) => pow(clamp(t, 0, 1).oneMinus(), pw).oneMinus();
+    // FractalNoise * HEIGHT_AMP
+    const n = vec3(0).toVar();
+    for (let i = 0; i < RU.hoct; i++){
+      const nf = RU.hfreq*Math.pow(RU.hlac, i), {per, fr} = axis(float(nf)), v = vis(float(1/nf)).toVar();
+      If(v.greaterThan(0), () => { n.addAssign(tRuNoised(p.mul(fr), per).mul(vec3(1, fr)).mul(Math.pow(RU.hgain, i)).mul(v)); });
+    }
+    const A = relK.mul(RU.hamp).toVar(); n.mulAssign(A);
+    const fade0 = clamp(n.x.div(A.mul(0.6)), -1, 1).toVar();
+    n.assign(n.mul(0.5).add(vec3(0.5, 0, 0)));
+    // ErosionFilter
+    const strength = relK.mul(RU.strength*RU.scale).toVar(), fadeTarget = float(fade0).toVar(), freq = float(1/(RU.scale*RU.cell)).toVar();
+    const rmult = float(1).toVar(), magnitude = float(0).toVar(), rnd = RU.round, on = RU.onset;
+    const sl = max(length(n.yz), 1e-10).toVar();
+    const rIn = mix(float(rnd[1]), float(rnd[0]), clamp(fadeTarget.add(0.5), 0, 1)).mul(rnd[2]);
+    const combi = easeOut(smoothStart(sl.mul(on[0]), rIn.mul(on[0]))).toVar(), rmMask = easeOut(sl.mul(on[2])).toVar(), rmFade = float(fadeTarget).toVar();
+    const gullySlope = mix(n.yz, n.yz.div(sl).mul(RU.aslope[0]), RU.aslope[1]).toVar(), hs = vec3(0).toVar();
+    Loop({start: 0, end: RU.oct, type: 'int', name: 'ruO'}, () => {
+      const v = vis(float(1).div(freq.mul(RU.cell))).toVar();
+      If(v.greaterThan(0), () => {
+        const {per, fr} = axis(freq);
+        const gl = length(gullySlope), nd = select(gl.greaterThan(1e-10), gullySlope.div(gl), gullySlope);
+        const ph = tRuPhacelle(p.mul(fr), per, nd).toVar();
+        const zw = ph.zw.mul(fr).negate().toVar(), sloping = abs(ph.y).toVar();
+        gullySlope.addAssign(zw.mul(sign(ph.y)).mul(strength).mul(RU.gully).mul(v));
+        const gullies = vec3(ph.x, zw.mul(ph.y)).toVar();
+        const faded = mix(vec3(fadeTarget, 0, 0), gullies.mul(RU.gully), combi).toVar();
+        const fadedL = mix(vec3(fadeTarget, 0, 0), faded, v).toVar();   // (level of detail: toward the fade target)
+        hs.addAssign(fadedL.mul(strength));
+        fadeTarget.assign(fadedL.x);
+        const rO = mix(float(rnd[1]), float(rnd[0]), clamp(ph.x.add(0.5), 0, 1)).mul(rmult);
+        combi.assign(powInv(combi, RU.detail).mul(easeOut(smoothStart(sloping.mul(on[1]), rO.mul(on[1])))));
+        rmFade.assign(mix(rmFade, gullies.x, rmMask.mul(v)));
+        rmMask.mulAssign(mix(float(1), easeOut(sloping.mul(on[3])), v));
+      }).Else(() => { hs.x.addAssign(fadeTarget.mul(strength)); });
+      magnitude.addAssign(strength); strength.mulAssign(RU.gain); freq.mulAssign(RU.lac); rmult.mulAssign(rnd[3]);
+    });
+    const offset = mix(float(RU.hoff[0]), fade0.negate(), RU.hoff[1]).mul(magnitude);
+    const ridge = rmFade.mul(rmMask.oneMinus()), eroD = hs.x.div(magnitude);
+    const packed = floor(clamp(ridge.mul(0.5).add(0.5), 0, 1).mul(255).add(0.5)).add(clamp(eroD.mul(0.5).add(0.5), 0, 1).mul(0.998));
+    return vec4(n.x.add(hs.x).add(offset), n.yz.add(hs.yz), packed);
+  });
+  // the eroded terrain at q: Rune's height over our macro elevation (ruToH); the heights-only bake carries his ridge map and erosion offset in
+  // y and z (the ridge pass stores them); elsewhere y, z are the slope (normalized h per noise unit, from his analytic slope)
   const uberAt = (q, lod, wl, amp, rg, hOnly = false) => {
     const t = clamp(rg.mn.x.add(clamp(amp.sub(1.5).div(2.5), -0.4, 0.6).mul(0.35)).add(0.25).div(0.3), 0, 1), m = t.mul(t).mul(t.mul(-2).add(3)).toVar();
-    const dl = rg.dl || vec4(0, 1, 0, 0);
-    const sharp = clamp(m.mul(UB.sharpM).add(UB.sharp0).add(dl.w.mul(0.9)).add(rg.rA.x.mul(UB.sharpR)), -1, 1).toVar();
-    const ero = m.mul(UB.eroM).add(UB.ero0).toVar(), gainK = sqrt(clamp(dl.y, 0.5, 1.4)).mul(UB.gain).toVar(), warpA = dl.x.mul(2).add(UB.warp0).toVar();
     const rt = clamp(rg.rB.x.add(0.35).div(0.7), 0, 1), rel = rt.mul(rt).mul(rt.mul(-2).add(3)).mul(UB.relA).add(UB.rel0).toVar();   // (relief field, as JS)
-    const e = max(lod.mul(0.5), 2e-4).toVar();
-    const U0 = tUberN(q, lod, sharp, ero, gainK, warpA).toVar();
-    const H = U => tUberShape(U, wl, amp, m, dl.z, rel);
-    const b0 = H(U0).toVar(), Hq = d => H(tUberN(q.add(d), lod, sharp, ero, gainK, warpA));
-    const bx = hOnly ? b0 : Hq(vec2(e, 0)).toVar(), by = hOnly ? b0 : Hq(vec2(0, e)).toVar();   // (the bake skips these: the slope pass)
-    const out = (hOnly ? vec3(b0, 0, 0) : vec3(b0, bx.sub(b0).div(e), by.sub(b0).div(e))).toVar();
-    if (UB.ES > 0) If(b0.greaterThan(wl), () => {
-      const E = UB.EFD;   // (central differences over 2*EFD: see uberH)
-      const g = vec2(Hq(vec2(E, 0)).sub(Hq(vec2(-E, 0))), Hq(vec2(0, E)).sub(Hq(vec2(0, -E)))).div(2*E).mul(amp).mul(SUK).toVar(), fade = clamp(U0.div(UB.zN*1.5), -1, 1).toVar(), str = smoothstep(0, 0.08, b0.sub(wl)).mul(UB.ES).toVar(), k = amp.mul(1000);
-      const qe = vec2(q.x, ym(q.y, SPER)).toVar();   // (the absolute along-axis coordinate, wrapped at SPER: the bake's q.y is an offset in its window)
-      const er = tUberEro(qe, g, fade, str, lod).toVar(), e0 = er.x.div(k).toVar();
-      if (hOnly) out.assign(vec3(b0.add(e0), er.y, 0));   // (y: the ridge map, carried to the ridge pass)   // (the bake: the slope comes from the neighbouring baked heights, clipSlopeMat)
-      else { const ex = tUberEro(qe.add(vec2(e, 0)), g, fade, str, lod).x.div(k), ey = tUberEro(qe.add(vec2(0, e)), g, fade, str, lod).x.div(k);
-        out.assign(vec3(b0.add(e0), bx.add(ex).sub(b0.add(e0)).div(e), by.add(ey).sub(b0.add(e0)).div(e))); }
-    });
-    return out;
+    const mm = m.mul(m).mul(m.mul(-2).add(3)).toVar(), relK = clamp(rel.mul(mm.mul(1 - RU.relLow).add(RU.relLow)), 0.1, 1.6).toVar();
+    const r = tRuHeight(vec2(q.x, ym(q.y, SPER)), lod, relK).toVar();
+    const ampC = max(amp, 0.05).toVar();
+    const h = wl.add(UB.low0).add(mm.mul(UB.mtn0 - UB.low0)).sub(wl.sub(0.25).mul(UB.wet)).add(r.x.sub(0.5).add(relK.mul(U_RUC)).mul(U_RUNU).div(SUK).div(ampC)).toVar();   // (ruToH)
+    if (hOnly) return vec3(h, floor(r.w).div(255).mul(2).sub(1), fract(r.w).div(0.998).mul(2).sub(1));
+    return vec3(h, r.yz.div(ampC.mul(SUK)));
   };
   const analyticBaked = (q, lod, wl, amp, hOnly = false) => {
     const ha = (UBER ? uberAt(q, lod, wl, amp, regions(q, wl), hOnly) : terrainAt(q, lod, wl, amp, regions(q, wl))).toVar(), hh = ha.x;
@@ -2775,7 +2844,7 @@ const CDL = {P: 20, TOP: 14, MAXN: 4096};
 const cdMorphStart = C => Math.max(0.75, (C + 2.83*CDL.P)/(2*C));
 const U_CDR = uniform(80), U_CDMS = uniform(cdMorphStart(80)), U_CDH = uniform(0), U_QT = uniform(0);   // (U_CDH: the ground's height under the camera, km: the LOD distances are measured to the ground at that height)   // (U_CRAG: a debug scale on the crags, for isolating them; 1 in play)   // (U_REF: the terrain pixels' reference mode, see the terrain material)
 // the ridge map at the level the ground is drawn from dNoise away (see clipRidge)
-const groundRidge = (dNoise, qr) => clipRidge(floor(clipLevel(dNoise)), qr);
+const groundRidge = (dNoise, qr) => clipRidge(floor(clipLevel(dNoise)), qr), groundRuneV = (dNoise, qr) => clipRidgeV(floor(clipLevel(dNoise)), qr);
 const clipLevel = dNoise => clamp(log2(max(dNoise, 1e-6)).sub(Math.log2(CL.DV/2) + CL.L0).sub(U_LODB), 0, CL.NL - 1.001);
 // bilinear fetch of level kf (an integer-valued float node) at camera-relative qr: vec4(H, dH/dqx, dH/dqy, h)
 function clipFetch(kf, qr){
@@ -2873,11 +2942,13 @@ CL.KSH = -9 - CL.L0;
 // the erosion's ridge map at camera-relative qr (-1 creases .. 1 ridges; 0 where no level covers it or with the classic terrain): from level kf,
 // or the first coarser one whose window holds qr (a coarser level's map has fewer octaves: only the broader gullies). Hardware-filtered: it
 // shades and thresholds, it never shapes the ground
-function clipRidge(kf, qr){
-  if (!UBER) return float(0);
+// clipRidgeV: the whole atlas texel (0..1: R the level's crest/crease map, G Rune's ridge map, B his erosion offset, A his tree factor; see CL.rdRt)
+function clipRidgeV(kf, qr){
+  if (!UBER) return vec4(0.5, 0.5, 0.5, 0);
   const kj = clipFindLevel(kf, qr).toVar(), t = clipT(min(kj, float(CL.NL - 1)), qr).toVar();
-  return select(kj.greaterThan(98), float(0), rdTexN.sample(clipUV(min(kj, float(CL.NL - 1)), t.x, t.y)).level(0).x.mul(2).sub(1));
+  return select(kj.greaterThan(98), vec4(0.5, 0.5, 0.5, 0), rdTexN.sample(clipUV(min(kj, float(CL.NL - 1)), t.x, t.y)).level(0));
 }
+const clipRidge = (kf, qr) => clipRidgeV(kf, qr).x.mul(2).sub(1);
 function clipAO(dNoise, qr){
   const kp = max(clipLevel(dNoise), CL.KSH).toVar(), k0 = floor(kp).toVar();
   const one = kf => { const t = clipT(kf, qr).toVar(); return select(clipInside(t), aoTexN.sample(clipUV(kf, t.x, t.y)).level(0).x, float(1)); };
@@ -2966,7 +3037,15 @@ CL.rdQuad = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), (() => {
       for (let d = 0; d < 8; d++){ const a = d*Math.PI/4; ring.addAssign(rd(Math.round(Math.cos(a)*r), Math.round(Math.sin(a)*r)).x); }
       tpi.addAssign(c.x.sub(ring.div(8)).div(sp.mul(r)).mul(0.5));
     }
-    return vec4(select(c.w.greaterThanEqual(98), float(0.5), clamp(tpi.div(0.12).mul(0.5).add(0.5), 0, 1)), 0, 0, 1);   // (+-0.12: a hollow or rib ~7 deg below / above its surroundings is a full crease / crest)
+    // G, B: Rune's ridge map and erosion offset (carried in y, z by the heights-only bake); A: his tree factor (GetTreesAmount without its height
+    // term - the tree line comes from the climate where it is used): eroded hollows (occlusion), near-flat ground (normal y), off the ridges,
+    // above the water (his 0.007 units over the water line)
+    const ridge = c.y, eroD = c.z, gx = rd(1, 0).x.sub(rd(-1, 0).x).div(sp.mul(2)), gy = rd(0, 1).x.sub(rd(0, -1).x).div(sp.mul(2));
+    const normalY = float(1).div(sqrt(gx.mul(gx).add(gy.mul(gy)).add(1))), occ = eroD.add(0.5);
+    const trees = smoothstep(0, 0.4, occ).mul(smoothstep(0.95, 1, normalY)).mul(smoothstep(-1.4, 0, ridge)).mul(smoothstep(0, U_RUNU.div(SUK).mul(0.007), c.x));
+    const none = c.w.greaterThanEqual(98);
+    return vec4(select(none, float(0.5), clamp(tpi.div(0.12).mul(0.5).add(0.5), 0, 1)), select(none, float(0.5), clamp(ridge.mul(0.5).add(0.5), 0, 1)),
+      select(none, float(0.5), clamp(eroD.mul(0.5).add(0.5), 0, 1)), select(none, float(0), trees));   // (R: +-0.12: a hollow or rib ~7 deg below / above its surroundings is a full crease / crest)
   })();
   return m;
 })());
@@ -3480,6 +3559,8 @@ function makeTerrainMat(clip){
       If(dm.equal(12), () => { o.assign(vec3(vQH.w)); });   // haze amount
       If(dm.equal(13), () => { const dd = max(hP.x.negate().sub(LIFT), 0); o.assign(mix(mix(vec3(0, 0.1, 0.5), vec3(0, 1, 0.5), clamp(dd.mul(8), 0, 1)), vec3(1, 0.2, 0), clamp(dd.mul(8).sub(1), 0, 1))); });   // the terrain pass's own (per-pixel) water depth
       If(dm.equal(14), () => { o.assign(vec3(aoP)); });   // ambient occlusion (1 = open)
+      If(dm.greaterThan(15.5), () => { const rv = groundRuneV(dN, vQr).toVar();
+        o.assign(select(dm.equal(16), vec3(rv.y.mul(rv.y)), select(dm.equal(17), vec3(rv.z), vec3(rv.w)))); });   // Rune's ridge map (as his: squared), erosion offset, tree factor
       If(dm.equal(15), () => { o.assign(mix(mix(vec3(gray), vec3(0.1, 0.35, 1), clamp(rP.negate(), 0, 1)), vec3(1, 0.25, 0.1), clamp(rP, 0, 1))); });   // the erosion's ridge map: blue creases, red crests
       res.assign(o);
     });
@@ -6732,7 +6813,7 @@ $('b-wp').addEventListener('click', openSheet);
 $('b-perf').addEventListener('click', () => setPerf(!perfOn));
 $('b-hmap').addEventListener('click', () => setHmap(!hmapOn));
 $('b-hide').addEventListener('click', () => { profHide = (profHide + 1) % PROF_HIDE.length; $('b-hide').textContent = 'Hide (profiling): ' + PROF_HIDE[profHide]; });
-const DBG_NAMES = ['off', 'normals', 'curvature', 'slope / rock', 'mesh spacing', 'mesh vs true normal', 'shadows', 'height contours', 'mesh height error', 'water line', 'albedo', 'light multiplier', 'haze', 'water depth', 'ambient occlusion', 'ridge map'];
+const DBG_NAMES = ['off', 'normals', 'curvature', 'slope / rock', 'mesh spacing', 'mesh vs true normal', 'shadows', 'height contours', 'mesh height error', 'water line', 'albedo', 'light multiplier', 'haze', 'water depth', 'ambient occlusion', 'ridge map', 'Rune ridge map', 'Rune erosion offset', 'Rune tree factor'];
 // The debug views cost registers on every pixel, so the everyday terrain and water shaders are built without them; the first time a view is
 // picked, both are rebuilt with them (a few seconds of compiling, once) and swapped in. (They were only reachable with ?dbg, which a shared
 // link can't carry, so the button had stopped working.)
@@ -6771,6 +6852,26 @@ $('b-far').textContent = 'Far detail: ' + FAR_DETAIL[farDetail].name;
 window.__far = setFarDetail; window.__crag = v => { U_CRAG.value = v; for (const o of CL.forg) o.set(1e9, 1e9); clipRebakeHere(); }; window.__ref = v => { enableDebugViews(); U_REF.value = v; };
 // EXPERIMENT: the true terrain function per pixel within ~600 m (heights, slopes and so the materials at unlimited resolution) instead of the
 // baked data. It rebuilds the terrain shader once (as the debug views do); watch the frame rate.
+// THE TERRAIN SCALE (Rune's terrain): km per Rune unit - his whole demo box is one unit. Re-bakes everything; remembered.
+const RU_KMS = [8, 12, 16, 20, 24, 32, 40];
+function setRuKm(km){
+  RU.km = km; U_RUNU.value = km*SUK; try { localStorage.setItem('wayRuKm', String(km)); } catch (e) {}
+  $('b-rukm').textContent = 'Terrain scale: ' + km + ' km per Rune unit';
+  for (const o of CL.forg) o.set(1e9, 1e9); clipRebakeHere();
+}
+{ let k = 12; try { k = +localStorage.getItem('wayRuKm') || 12; } catch (e) {} if (!RU_KMS.includes(k)) k = 12; RU.km = k; U_RUNU.value = k*SUK; $('b-rukm').textContent = 'Terrain scale: ' + k + ' km per Rune unit'; }
+$('b-rukm').addEventListener('click', () => setRuKm(RU_KMS[(RU_KMS.indexOf(RU.km) + 1) % RU_KMS.length]));
+window.__rukm = setRuKm;
+// THE NOISE CENTRE: how high his terrain's mid height sits above the water line (Rune units x the relief; 0.14 x 12 km ~ 1.7 km on mountains)
+const RU_CS = [0, 0.04, 0.08, 0.11, 0.14, 0.17, 0.2];
+function setRuC(c){
+  RU.center = c; U_RUC.value = c; try { localStorage.setItem('wayRuC', String(c)); } catch (e) {}
+  $('b-ruc').textContent = 'Terrain noise centre: +' + c.toFixed(2) + ' (~' + (c*RU.km).toFixed(1) + ' km on mountains)';
+  for (const o of CL.forg) o.set(1e9, 1e9); clipRebakeHere();
+}
+{ let c = 0.14; try { const v = localStorage.getItem('wayRuC'); if (v !== null) c = +v; } catch (e) {} if (!RU_CS.includes(c)) c = 0.14; RU.center = c; U_RUC.value = c;
+  $('b-ruc').textContent = 'Terrain noise centre: +' + c.toFixed(2) + ' (~' + (c*RU.km).toFixed(1) + ' km on mountains)'; }
+$('b-ruc').addEventListener('click', () => setRuC(RU_CS[(RU_CS.indexOf(RU.center) + 1) % RU_CS.length]));
 $('b-exact').addEventListener('click', () => { const on = !(U_REF.value > 1.5); window.__ref(on ? 2 : 0); $('b-exact').textContent = 'Exact near ground: ' + (on ? 'on' : 'off') + ' (experimental)'; });
 // the exact view as text (to paste into a bug report): replayed with window.__go(mode, s, th, r, yaw, pitch) and window.__far(k)
 $('b-pos').addEventListener('click', () => {
