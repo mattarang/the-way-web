@@ -172,6 +172,25 @@ button:disabled{opacity:.45}
   #go{justify-self:start}
   #intro p{grid-row:1 / span 2}
 }
+
+/* DESKTOP (body.desk: keyboard and mouse - see DESKTOP in the script): no touch steering pad, a slimmer throttle (an indicator you can still drag),
+   key badges on the buttons, a key card, a crosshair while the mouse is captured, and hover states */
+body.desk #steer{display:none !important}
+body.desk #throttle{height:min(30vh, 220px);width:44px}
+body.desk #tcol .ib{width:44px}
+body.desk .ib{position:relative;cursor:pointer}
+body.desk .ib:hover{background:rgba(255,226,168,.12)}
+body.desk .ib[data-key]::after{content:attr(data-key);position:absolute;top:3px;right:4px;font-size:8.5px;line-height:1;padding:2px 3px;border-radius:3px;
+  border:1px solid var(--edge);color:var(--dim);font-family:'IBM Plex Mono',ui-monospace,monospace;letter-spacing:0;text-transform:none}
+body.desk #hudtop{cursor:pointer}
+#keys{position:fixed;left:var(--gl);bottom:calc(var(--gb, 16px) + var(--btn, 64px) + 18px);max-width:300px;padding:10px 12px;border-radius:12px;background:var(--glass);
+  border:1px solid var(--edge);font:11px/1.55 'IBM Plex Mono',ui-monospace,monospace;color:var(--hud);display:grid;grid-template-columns:auto 1fr;column-gap:12px;pointer-events:none}
+#keys b{color:var(--flaw);font-weight:500;white-space:nowrap}
+#keys .t{grid-column:1 / -1;color:var(--dim);font-size:9.5px;letter-spacing:.12em;text-transform:uppercase;margin-bottom:4px}
+#xhair{position:fixed;left:50%;top:50%;width:4px;height:4px;margin:-2px 0 0 -2px;border-radius:50%;background:rgba(255,246,225,.75);box-shadow:0 0 0 1px rgba(0,0,0,.35);pointer-events:none}
+#lockhint{position:fixed;left:50%;bottom:calc(var(--gb, 16px) + 6px);transform:translateX(-50%);padding:6px 12px;border-radius:999px;background:var(--glass);border:1px solid var(--edge);
+  font:11px/1.3 'IBM Plex Mono',ui-monospace,monospace;color:var(--dim);pointer-events:none;white-space:nowrap}
+body.locked{cursor:none}
 </style>
 </head>
 <body>
@@ -227,6 +246,9 @@ button:disabled{opacity:.45}
     </div>
     <button id="b-stop" class="ib" type="button" aria-label="Stop"></button>
   </div>
+  <div id="keys" hidden></div>
+  <div id="xhair" hidden></div>
+  <div id="lockhint" hidden>Click the view to look with the mouse · Esc releases it · ? for keys</div>
 </div>
 
 <div id="sheet" hidden>
@@ -234,6 +256,7 @@ button:disabled{opacity:.45}
   <div id="wp"></div>
   <p class="fine">The autopilot flies you there and stops just short. From the ground it climbs back to the flaw first.</p>
   <button id="b-assist" class="perfbtn" type="button">Jeep assist: on</button>
+  <button id="b-ui" class="perfbtn" type="button">Interface: desktop</button>
   <button id="b-clouds" class="perfbtn" type="button">Clouds: on</button>
   <button id="b-far" class="perfbtn" type="button">Far detail: Standard</button>
 </div>
@@ -1521,6 +1544,15 @@ let perf = null, perfOn = false;   // performance monitor (see setPerf)
 const perfPanels = {};
 const canvas = document.getElementById('c');
 const isPhone = matchMedia('(pointer: coarse)').matches;
+// DESKTOP: keyboard and mouse (WASD, mouselook) and the desktop layout. Detected - not a phone or tablet user agent, a fine pointer and no touch points
+// (an iPad's Safari reports a Mac user agent but has touch points) - unless ?ui=desktop / ?ui=touch or the Settings button chose (remembered)
+const DESKTOP = (() => {
+  const q = new URLSearchParams(location.search).get('ui');
+  if (q === 'desktop' || q === 'touch') return q === 'desktop';
+  try { const v = localStorage.getItem('wayUI'); if (v === 'desktop' || v === 'touch') return v === 'desktop'; } catch (e) {}
+  return !/Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent) && !(navigator.maxTouchPoints > 0) && matchMedia('(pointer: fine)').matches;
+})();
+document.body.classList.toggle('desk', DESKTOP);
 // TERRAIN LAB (?lab=1): terrain, water and their materials only - no grass, trees, rocks, clouds, flaw glow or shadow maps - so the terrain can be
 // investigated in a headless browser (far fewer pipelines to compile, far less to draw). Normal play never sets it.
 const LAB = /[?&]lab\b/.test(location.search);
@@ -6848,6 +6880,7 @@ function setModeUI(){
   setBtn(el.land, mode === 'walk' ? 'takeoff' : 'land', mode === 'walk' ? 'Take off' : mode === 'land' ? 'Landing' : 'Land');
   setBtn(el.look, 'look', (mode === 'free' || mode === 'walk' || mode === 'drive') ? 'Turn' : (Math.cos(yawTarget) < 0 ? 'Ahead' : 'Behind'));
   setThrottleUI();
+  if (typeof keysCard === 'function') keysCard();
 }
 function throttleFromEvent(e){
   const r = el.thr.getBoundingClientRect();
@@ -6885,8 +6918,8 @@ let steerId = null, steerIn = 0, steerKeys = 0, lookOff = 0, lookIdle = 9;
     const k = e.key.toLowerCase();
     if (k === 'a' || k === 'arrowleft'){ keys.l = true; upd(); }
     else if (k === 'd' || k === 'arrowright'){ keys.r = true; upd(); }
-    else if (k === 'w' || k === 'arrowup'){ throttle = Math.min(1, throttle + 0.1); setThrottleUI(); }
-    else if (k === 's' || k === 'arrowdown'){ throttle = Math.max(-1, throttle - 0.1); setThrottleUI(); }
+    else if (!DESKTOP && (k === 'w' || k === 'arrowup')){ throttle = Math.min(1, throttle + 0.1); setThrottleUI(); }
+    else if (!DESKTOP && (k === 's' || k === 'arrowdown')){ throttle = Math.max(-1, throttle - 0.1); setThrottleUI(); }
     else return;
     e.preventDefault();
   });
@@ -6905,6 +6938,98 @@ const endLook = e => { if (e.pointerId === lookId) lookId = null; };
 canvas.addEventListener('pointerup', endLook); canvas.addEventListener('pointercancel', endLook);
 
 $('b-stop').addEventListener('click', () => { auto = null; pending = null; throttle = 0; setThrottleUI(); });
+
+// ---------- DESKTOP CONTROLS (DESKTOP): mouselook through pointer lock, WASD by mode, the buttons on keys ----------
+// Keys are read by position (e.code), so WASD sits under the left hand on any keyboard layout.
+//   walking   W/S forward/back, A/D sideways, Shift run           driving  W gas, S brake / reverse (held), A/D steer, Space brake
+//   flying    W/S throttle up/down (it stays where you leave it), A/D turn, X stop, mouse wheel throttle
+//   any       R rejoin / enter / descend, L land / take off, E jeep, C camera, B turn round, M waypoints, F fullscreen, H shrink readout, ? keys
+const KB = new Set();
+let strafeV = 0;   // walking sideways (km/s, + right)
+const typing = e => e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.isContentEditable);
+const sheetOpen = () => !el.sheet.hidden || !$('dsheet').hidden;
+const clickIf = b => { if (b && !b.hidden && !b.disabled) b.click(); };
+function keysCard(){
+  const k = $('keys'); if (!DESKTOP || k.dataset.off === '1' || !started){ k.hidden = true; return; }
+  const rows = mode === 'walk' ? [['W A S D', 'walk'], ['Shift', 'run'], ['Mouse', 'look'], ['L', 'take off'], ['E', 'jeep'], ['R', 'rejoin the flaw']]
+    : mode === 'drive' ? [['W / S', 'gas / brake, reverse'], ['A / D', 'steer'], ['Space', 'brake'], ['Mouse', 'look around'], ['C', 'cockpit / chase'], ['E', 'get out']]
+    : mode === 'free' ? [['W / S', 'throttle'], ['Wheel', 'throttle'], ['A / D', 'turn'], ['Mouse', 'aim'], ['X', 'stop'], ['L', 'land'], ['R', 'rejoin the flaw']]
+    : mode === 'flaw' ? [['W / S', 'throttle'], ['Wheel', 'throttle'], ['X', 'stop'], ['Mouse', 'look'], ['M', 'waypoints'], ['R', 'descend']]
+    : mode === 'space' ? [['Mouse', 'look'], ['R', 'enter the borehole'], ['M', 'waypoints']]
+    : [['Mouse', 'look'], ['M', 'waypoints']];
+  k.innerHTML = '<span class="t">Keys · ? hides</span>' + rows.map(([a, b]) => `<b>${a}</b><span>${b}</span>`).join('') + '<b>F</b><span>fullscreen</span>';
+  k.hidden = false;
+}
+if (DESKTOP){
+  try { if (localStorage.getItem('wayKeysOff') === '1') $('keys').dataset.off = '1'; } catch (e) {}
+  // key badges on the buttons
+  [[el.mode, 'R'], [el.land, 'L'], [el.jeepB, 'E'], [el.camB, 'C'], [$('b-wp'), 'M'], [el.look, 'B'], [$('b-stop'), 'X']].forEach(([b, k]) => b.dataset.key = k);
+  // the intro's control list, for keyboard and mouse
+  const ul = document.querySelector('#intro ul');
+  if (ul) ul.innerHTML = '<li><b>Mouse</b></li><li>Click the view to look around; Esc gives the pointer back.</li>' +
+    '<li><b>W A S D</b></li><li>Throttle and turn in flight; walk and strafe on foot (Shift runs); drive the jeep.</li>' +
+    '<li><b>Keys</b></li><li>R rejoin or descend, L land, E jeep, M waypoints, F fullscreen. Press ? for the list.</li>';
+  // mouselook: the view captures the pointer on a click; Esc (the browser's) gives it back
+  canvas.addEventListener('mousedown', e => { if (started && e.button === 0 && !sheetOpen() && document.pointerLockElement !== canvas) canvas.requestPointerLock?.(); });
+  const lockUI = () => { const on = document.pointerLockElement === canvas; document.body.classList.toggle('locked', on); $('xhair').hidden = !on; $('lockhint').hidden = on || !started; };
+  document.addEventListener('pointerlockchange', lockUI); setInterval(lockUI, 1000);
+  document.addEventListener('mousemove', e => {
+    if (document.pointerLockElement !== canvas) return;
+    const s = 0.0024*(camera.fov/70);
+    if (mode === 'drive'){ lookOff += e.movementX*s; lookIdle = 0; } else yawTarget += e.movementX*s;
+    pitch = Math.max(-1.45, Math.min(1.45, pitch + e.movementY*s)); pitchEase = null;
+  });
+  // the wheel: throttle in flight and on the flaw
+  canvas.addEventListener('wheel', e => {
+    if (!started || !(mode === 'free' || mode === 'flaw')) return;
+    e.preventDefault(); throttle = Math.max(-1, Math.min(1, throttle - Math.sign(e.deltaY)*0.05)); auto = null; setThrottleUI();
+  }, {passive: false});
+  addEventListener('keydown', e => {
+    if (typing(e) || e.metaKey || e.ctrlKey || e.altKey) return;
+    if (e.code === 'Escape' && sheetOpen()){ el.sheet.hidden = true; $('dsheet').hidden = true; return; }
+    KB.add(e.code);
+    if (!started || e.repeat) { if (['KeyW', 'KeyA', 'KeyS', 'KeyD', 'Space'].includes(e.code)) e.preventDefault(); return; }
+    const k = e.code;
+    if (k === 'KeyR' || k === 'Enter') clickIf(el.mode);
+    else if (k === 'KeyL') clickIf(el.land);
+    else if (k === 'KeyE') clickIf(el.jeepB);
+    else if (k === 'KeyC') clickIf(el.camB);
+    else if (k === 'KeyB') clickIf(el.look);
+    else if (k === 'KeyM' || k === 'Tab'){ if (document.pointerLockElement) document.exitPointerLock(); if (el.sheet.hidden) $('b-wp').click(); else el.sheet.hidden = true; }
+    else if (k === 'KeyX') $('b-stop').click();
+    else if (k === 'KeyH') $('hudtop').click();
+    else if (k === 'Backquote'){ if (document.pointerLockElement) document.exitPointerLock(); $('dsheet').hidden = !$('dsheet').hidden; }
+    else if (k === 'Slash'){ const c = $('keys'); c.dataset.off = c.dataset.off === '1' ? '' : '1'; try { localStorage.setItem('wayKeysOff', c.dataset.off); } catch (er) {} keysCard(); }
+    else if (k === 'KeyF'){ if (document.fullscreenElement) document.exitFullscreen?.(); else document.documentElement.requestFullscreen?.().catch(() => {}); }
+    else if (!['KeyW', 'KeyA', 'KeyS', 'KeyD', 'Space', 'ShiftLeft', 'ShiftRight'].includes(k)) return;
+    e.preventDefault();
+  });
+  addEventListener('keyup', e => { KB.delete(e.code); });
+  addEventListener('blur', () => KB.clear());
+}
+// once a frame, before the movement: the held keys (desktop)
+function deskStep(dt){
+  if (!DESKTOP || !started || typing({target: document.activeElement})) return;
+  const f = (KB.has('KeyW') ? 1 : 0) - (KB.has('KeyS') ? 1 : 0), side = (KB.has('KeyD') ? 1 : 0) - (KB.has('KeyA') ? 1 : 0), run = KB.has('ShiftLeft') || KB.has('ShiftRight');
+  if (mode === 'walk'){
+    // on foot: forward/back as the throttle (walking pace, Shift runs), sideways as its own velocity
+    const pace = run ? 1 : 0.45;
+    if (f !== 0 || side !== 0 || throttle !== 0) throttle = f*pace;
+    strafeV += (side*pace*WALK_MAX - strafeV)*Math.min(1, dt*3);
+  } else {
+    strafeV = 0;
+    if (mode === 'drive'){
+      // pedals held: W gas, S brake then reverse, nothing coasts; Space brakes hard
+      throttle = KB.has('Space') ? 0 : f;
+      if (KB.has('Space')) v -= Math.sign(v)*Math.min(Math.abs(v), 0.009*dt);
+      setThrottleUI();
+    } else if (mode === 'free' || mode === 'flaw'){
+      // the throttle lever, moved while W / S are held (it stays where you leave it); A / D turn the view in flight
+      if (f !== 0){ throttle = Math.max(-1, Math.min(1, throttle + f*dt*0.7)); auto = null; setThrottleUI(); }
+      if (mode === 'free' && side !== 0) yawTarget += side*dt*1.2;
+    }
+  }
+}
 el.look.addEventListener('click', () => {
   if (mode === 'drive'){ lookOff = Math.abs(lookOff) > 1.5 ? 0 : Math.PI; lookIdle = -3; setModeUI(); return; }
   const facingBack = Math.cos(yawTarget) < 0;
@@ -7087,6 +7212,8 @@ if (/[?&]height\b/.test(location.search)) setHmap(true);
 { let want = /[?&]stats\b/.test(location.search); try { if (localStorage.getItem('wayPerf') === '1') want = true; } catch (e) {}
   if (want) setPerf(true); }
 $('b-close').addEventListener('click', () => { el.sheet.hidden = true; });
+$('b-ui').textContent = 'Interface: ' + (DESKTOP ? 'keyboard and mouse' : 'touch') + ' (tap: switch, reloads)';
+$('b-ui').addEventListener('click', () => { try { localStorage.setItem('wayUI', DESKTOP ? 'touch' : 'desktop'); } catch (e) {} location.reload(); });
 // the debug sheet: its own short menu (opened from Places), so testing doesn't mean scrolling the place list each time
 $('b-dbgm').addEventListener('click', () => { el.sheet.hidden = true; $('dsheet').hidden = false; });
 $('b-dclose').addEventListener('click', () => { $('dsheet').hidden = true; });
@@ -7381,6 +7508,7 @@ function stepBody(now){
   if (glLost) return;
   adaptResolution(realDt);
 
+  deskStep(dt);
   groundAt(shipS, shipTh, ground);
   const floorR = R - ground.H - 0.12;   // highest radius the ship may reach (0.12 km clearance)
   let cap = VMAX;
@@ -7500,9 +7628,9 @@ function stepBody(now){
     shipTh += ((-vx*es + vy*ec)*dt)/Math.max(shipR, 0.5);
     shipTh = Math.atan2(Math.sin(shipTh), Math.cos(shipTh));
   } else if (mode === 'walk' && started){
-    // walk where you face; pitch only tilts the view
-    shipS += v*Math.cos(yaw)*dt;
-    shipTh += v*Math.sin(yaw)*dt/shipR;
+    // walk where you face (and sideways: strafeV, desktop); pitch only tilts the view
+    shipS += (v*Math.cos(yaw) - strafeV*Math.sin(yaw))*dt;
+    shipTh += (v*Math.sin(yaw) + strafeV*Math.cos(yaw))*dt/shipR;
     shipTh = Math.atan2(Math.sin(shipTh), Math.cos(shipTh));
   } else if (mode === 'drive' && started){
     shipS += v*Math.cos(jeep.h)*dt;
